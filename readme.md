@@ -121,26 +121,37 @@ graph TD
 ```
 
 🗓️ 開発ロードマップ (Roadmap)
-Phase 1: The Soul Sync (Foundation)
-[x] ADKを用いた基本エージェント（Orchestrator）の構築
 
-[x] Gemini 3.0 Pro (Proxy: 2.5 Pro) による深層インタビューロジックの実装
+### Phase 1: The Soul Sync (Foundation) - ✅ Almost Complete
+- [x] **Project Setup**: ADKディレクトリ構成と環境設定
+- [x] **Mock Runner**: Discordなしでロジック検証を行うCLIツールの実装
+- [x] **Interviewer Agent**:
+    - [x] Gemini 2.5 Pro (via Vertex AI) による深層インタビューロジック
+    - [x] 会話からの「Insight (原体験・Mission)」抽出と構造化データの保存 (Local JSON)
+    - [x] インタビュー制御 (最大質問数制限、理解度表示)
+- [x] **Profile Manager**: ローカル環境(JSON)と本番環境(GCS)の抽象化レイヤー
 
-[x] Vertex AI Memory Bank (Prototype: Local JSON) へのプロファイル永続化の検証
+### Phase 2: The Observer (Autonomy) - ✅ Complete
+- [x] **Observer Agent (Logic)**:
+    - [x] 助成金情報とSoul Profileの「共鳴度(Resonance Score)」判定プロンプト
+- [x] **Observer Agent (Tools)**:
+    - [x] Google Search Grounding / Dynamic Retrieval の完全統合
+    - [x] 検索クエリの自律生成ロジック (`_generate_queries`)
+- [x] **Orchestrator**: 
+    - [x] Periodic Checks logic Implementation
+- [x] **Scheduling**:
+    - [x] Discord Tasks Loop による定期実行トリガー (168h/Weekly)
 
-Phase 2: The Observer (Autonomy)
-[ ] Gemini 2.5 Flash と Dynamic Retrieval を用いた自律検索ツールの実装
-
-[ ] 助成金情報の「共鳴度判定」プロンプトエンジニアリング
-
-[ ] Cloud Schedulerによる定期実行トリガーの設定
-
-Phase 3: The Action (Integration)
-[ ] 申請書ドラフト生成とGoogle Docs連携
-
-[ ] Vertex AI Agent Engine への完全移行と本番デプロイ (adk deploy)
-
-[ ] デモ動画作成
+### Phase 3: The Action & Interface (Integration) - 📅 Planned
+- [ ] **Discord Integration**:
+    - [ ] Discord Bot UI (PyCord / Discord.py) の実装
+    - [ ] 非同期通知システム
+- [ ] **Drafter Agent**:
+    - [ ] 申請書ドラフト生成ロジック
+    - [ ] Google Docs API 連携によるドキュメント出力
+- [ ] **Deployment**:
+    - [ ] Vertex AI Agent Engine へのデプロイ
+    - [ ] Cloud Run 上でのホスティング
 
 🚀 Getting Started
 Prerequisites
