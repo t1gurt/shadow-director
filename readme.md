@@ -55,19 +55,78 @@ Behavior: マッチ度が高い案件について、Memory Bank内の過去の�
 
 🏗️ システム構成 (Architecture)
 最新の Google Agent Development Kit (ADK) を採用し、スケーラブルかつモジュラーなマルチエージェントシステムを構築しています。
+ユーザー（NPO代表）とエージェントが協働する「デジタルオフィス」として Discord を採用。
+
+```mermaid
+graph TD
+    User(("NPO Representative")) -->|"Chat & Upload"| Discord
+    
+    subgraph "Interface Layer"
+        Discord["Discord Bot (Python)"]
+        Discord -->|Webhook| PubSub
+    end
+
+    subgraph "Brain Layer (Vertex AI)"
+        PubSub -->|Trigger| AgentCore["Agent Core (Cloud Run)"]
+        
+        AgentCore -->|"Deep Reasoning"| GeminiPro["Gemini 3.0 Pro"]
+        AgentCore -->|"Fast Response"| GeminiFlash["Gemini 3.0 Flash"]
+        
+        GeminiPro <-->|"Long Context"| ContextCache[("Context Cache\nSoul Profile + Articles")]
+        GeminiPro -->|"Real-time Data"| Grounding["Grounding with Google Search"]
+    end
+
+    subgraph "Action Layer"
+        AgentCore -->|"Post Notification"| Discord
+        AgentCore -->|"Create Doc"| GDrive["Google Docs API"]
+    end
+
+    Scheduler["Cloud Scheduler"] -->|"Periodic Trigger"| AgentCore
+```
+
+🛠️ 技術スタック (Tech Stack)
+* LLM: Google Gemini 3.0 Pro (推論・執筆・戦略立案), Gemini 3.0 Flash (チャット・一次選別)
+
+* Why 3.0 Pro? : 助成金の「募集要項の裏にある意図」を読み解く文脈理解力と、数千件の情報を裁く処理速度の両立のため。
+
+* Platform: Google Cloud (Vertex AI, Cloud Run, Pub/Sub, Cloud Scheduler)
+
+* Interface: Discord.py
+
+* Framework: LangChain or Firebase Genkit (検討中)
 
 📂 ディレクトリ構成 (Directory Structure)
 本リポジトリは、Google ADK (Python) の標準構成に準拠しています。
 
-. ├── README.md ├── pyproject.toml # 依存関係 (google-adk, etc.) ├── main.py # Discord Gateway Entrypoint ├── adk_deploy.sh # Agent Engine デプロイ用スクリプト ├── src │ ├── agents │ │ ├── init.py │ │ ├── orchestrator.py # ルーティングロジック │ │ ├── interviewer.py # Gemini 3.0 Pro 定義 │ │ ├── observer.py # Gemini 2.5 Flash + Search定義 │ │ └── drafter.py # ドキュメント生成定義 │ ├── tools │ │ ├── search_tool.py # Dynamic Retrieval Config設定 │ │ └── gdocs_tool.py # Google Docs API Tool │ └── memory │ └── profile_manager.py # Memory Bank 操作用 └── config └── prompts.yaml # 各エージェントのシステムプロンプト
+```text
+.
+ ├── README.md
+ ├── pyproject.toml # 依存関係 (google-adk, etc.)
+ ├── main.py # Discord Gateway Entrypoint
+ ├── adk_deploy.sh # Agent Engine デプロイ用スクリプト
+ ├── src
+ │ ├── agents
+ │ │ ├── init.py
+ │ │ ├── orchestrator.py # ルーティングロジック
+ │ │ ├── interviewer.py # Gemini 3.0 Pro 定義
+ │ │ ├── observer.py # Gemini 2.5 Flash + Search定義
+ │ │ └── drafter.py # ドキュメント生成定義
+ │ ├── tools
+ │ │ ├── search_tool.py # Dynamic Retrieval Config設定
+ │ │ └── gdocs_tool.py # Google Docs API Tool
+ │ └── memory
+ │ └── profile_manager.py # Memory Bank 操作用
+ └── config
+ └── prompts.yaml # 各エージェントのシステムプロンプト
+```
 
 🗓️ 開発ロードマップ (Roadmap)
 Phase 1: The Soul Sync (Foundation)
 [x] ADKを用いた基本エージェント（Orchestrator）の構築
 
-[x] Gemini 3.0 Pro による深層インタビューロジックの実装
+[x] Gemini 3.0 Pro (Proxy: 2.5 Pro) による深層インタビューロジックの実装
 
-[x] Vertex AI Memory Bank (GA) へのプロファイル永続化の検証
+[x] Vertex AI Memory Bank (Prototype: Local JSON) へのプロファイル永続化の検証
 
 Phase 2: The Observer (Autonomy)
 [ ] Gemini 2.5 Flash と Dynamic Retrieval を用いた自律検索ツールの実装

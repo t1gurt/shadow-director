@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: shadow-director
+Version: 0.1.0
+Summary: NPO-SoulSync Agent: The Autonomous Shadow Director
+Requires-Python: >=3.10
+Requires-Dist: discord.py>=2.3.0
+Requires-Dist: google-cloud-aiplatform>=1.38.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: pyyaml>=6.0

@@ -1,0 +1,16 @@
+[project]
+name = "shadow-director"
+version = "0.1.0"
+description = "NPO-SoulSync Agent: The Autonomous Shadow Director"
+requires-python = ">=3.10"
+dependencies = [
+    "discord.py>=2.3.0",
+    "google-cloud-aiplatform>=1.38.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
