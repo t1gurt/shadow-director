@@ -122,7 +122,7 @@ graph TD
 
 🗓️ 開発ロードマップ (Roadmap)
 
-### Phase 1: The Soul Sync (Foundation) - ✅ Almost Complete
+### Phase 1: The Soul Sync (Foundation) - ✅ Complete
 - [x] **Project Setup**: ADKディレクトリ構成と環境設定
 - [x] **Mock Runner**: Discordなしでロジック検証を行うCLIツールの実装
 - [x] **Interviewer Agent**:
@@ -142,16 +142,70 @@ graph TD
 - [x] **Scheduling**:
     - [x] Discord Tasks Loop による定期実行トリガー (168h/Weekly)
 
-### Phase 3: The Action & Interface (Integration) - 📅 Planned
-- [ ] **Discord Integration**:
-    - [ ] Discord Bot UI (PyCord / Discord.py) の実装
-    - [ ] 非同期通知システム
-- [ ] **Drafter Agent**:
-    - [ ] 申請書ドラフト生成ロジック
-    - [ ] Google Docs API 連携によるドキュメント出力
-- [ ] **Deployment**:
-    - [ ] Vertex AI Agent Engine へのデプロイ
-    - [ ] Cloud Run 上でのホスティング
+### Phase 3: The Action & Interface (Integration) - ✅ Complete
+- [x] **Drafter Agent**:
+    - [x] 申請書ドラフト生成ロジック (`src/agents/drafter.py`)
+    - [x] Mock Google Docs Output (`src/tools/gdocs_tool.py`)
+- [x] **Discord Integration**:
+    - [x] Discord Bot UI (PyCord / Discord.py) の実装
+    - [x] 非同期通知システム
+- [x] **Deployment** (Complete):
+    - [x] Dockerfile & Deployment Scripts (`Dockerfile`, `deploy_cloudrun.sh`)
+    - [x] Vertex AI Agent Engine Integration
+    - [x] Cloud Run Hosting (`https://shadow-director-bot-182793624818.us-central1.run.app`)
+### Phase 6: Deployment Preparation - ✅ Complete
+- [x] **Containerization**:
+    - [x] Dockerfile & .dockerignore
+- [x] **Deployment Scripts**:
+    - [x] `deploy_cloudrun.sh` (Google Cloud Run)
+- [ ] **Production Release** (See `docs/NEXT_STEPS.md`):
+    - [ ] Execute Deployment to Google Cloud
+    - [ ] Discord Real-world Testing
+
+🚀 Deployment (Google Cloud Run)
+
+本番環境(Google Cloud Run)へのデプロイ手順です。
+
+### 1. Prerequisites
+- Google Cloud SDK (`gcloud`) installed & authenticated.
+- Docker installed.
+
+### 2. Setup Google Cloud Project
+```bash
+# Login to Google Cloud
+gcloud auth login
+gcloud config set project zenn-shadow-director
+
+# Enable APIs
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com aiplatform.googleapis.com
+```
+
+### 3. Deploy
+付属のスクリプトを使用することで、ビルドからデプロイまでを一括で行えます。
+
+```bash
+# Linux / WSL / Git Bash
+bash deploy_cloudrun.sh
+```
+
+**Note:** `deploy_cloudrun.sh` 内の `REGION` や `PROJECT_ID` は適宜修正してください。
+また、本番運用時は `DISCORD_BOT_TOKEN` を [Secret Manager](https://cloud.google.com/secret-manager/docs/creating-and-accessing-secrets) 経由で渡すことを強く推奨します。
+
+### 4. Discord Bot Setup (Invitation)
+Botをサーバーに招待するための手順です。
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) にアクセス。
+2. アプリケーションを選択し、左メニューの **OAuth2** -> **URL Generator** をクリック。
+3. **SCOPES** で `bot` にチェックを入れる。
+4. **BOT PERMISSIONS** で以下にチェックを入れる（または `Administrator`）:
+    - `Send Messages`
+    - `Read Message History`
+    - `Attach Files` (ドラフト送付用)
+    - `View Channels`
+5. 生成された URL をブラウザで開き、自分のサーバーに追加する。
+
+### 5. Verify
+デプロイ完了後、Discord Bot がオンラインになり、メンションやDMに応答することを確認してください。
 
 🚀 Getting Started
 Prerequisites

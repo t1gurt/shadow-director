@@ -1,5 +1,7 @@
 pyproject.toml
+src/agents/drafter.py
 src/agents/interviewer.py
+src/agents/observer.py
 src/agents/orchestrator.py
 src/memory/profile_manager.py
 src/shadow_director.egg-info/PKG-INFO
@@ -7,3 +9,5 @@ src/shadow_director.egg-info/SOURCES.txt
 src/shadow_director.egg-info/dependency_links.txt
 src/shadow_director.egg-info/requires.txt
 src/shadow_director.egg-info/top_level.txt
+src/tools/gdocs_tool.py
+src/tools/search_tool.py
