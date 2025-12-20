@@ -29,7 +29,7 @@ class DrafterAgent:
         # Using Interviewer model (Pro) for drafting as it requires high reasoning/writing capability
         # Or we can define a separate drafter_model in config if needed. 
         # For now, reusing interviewer_model or defaulting to gemini-2.5-pro
-        self.model_name = self.config.get("model_config", {}).get("interviewer_model", "gemini-2.5-pro")
+        self.model_name = self.config.get("model_config", {}).get("interviewer_model", "gemini-1.5-pro-002")
         self.docs_tool = GoogleDocsTool()
 
     def _load_config(self) -> Dict[str, Any]:

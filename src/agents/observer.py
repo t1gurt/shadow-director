@@ -30,7 +30,7 @@ class ObserverAgent:
             print(f"Failed to init GenAI client: {e}")
             self.client = None
             
-        self.model_name = self.config.get("model_config", {}).get("observer_model", "gemini-2.5-flash")
+        self.model_name = self.config.get("model_config", {}).get("observer_model", "gemini-1.5-flash-002")
         self.search_tool = SearchTool()
 
     def _load_config(self) -> Dict[str, Any]:

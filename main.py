@@ -85,7 +85,8 @@ async def on_message(message):
         # Show typing indicator
         async with message.channel.typing():
             if orchestrator:
-                response = orchestrator.route_message(user_input, str(message.author.id))
+                # Use channel.id instead of author.id to isolate sessions per channel
+                response = orchestrator.route_message(user_input, str(message.channel.id))
             else:
                 response = "System initializing... Please wait."
         

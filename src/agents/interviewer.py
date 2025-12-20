@@ -35,7 +35,7 @@ class InterviewerAgent:
             print(f"Failed to init GenAI client: {e}")
             self.client = None
         
-        self.model_name = self.config.get("model_config", {}).get("interviewer_model", "gemini-2.5-flash")
+        self.model_name = self.config.get("model_config", {}).get("interviewer_model", "gemini-1.5-pro-002")
 
     def _load_config(self) -> Dict[str, Any]:
         try:

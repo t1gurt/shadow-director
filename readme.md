@@ -158,9 +158,9 @@ graph TD
     - [x] Dockerfile & .dockerignore
 - [x] **Deployment Scripts**:
     - [x] `deploy_cloudrun.sh` (Google Cloud Run)
-- [ ] **Production Release** (See `docs/NEXT_STEPS.md`):
-    - [ ] Execute Deployment to Google Cloud
-    - [ ] Discord Real-world Testing
+- [x] **Production Release** (See `docs/NEXT_STEPS.md`):
+    - [x] Execute Deployment to Google Cloud
+    - [ ] Discord Real-world Testing (In Progress)
 
 🚀 Deployment (Google Cloud Run)
 

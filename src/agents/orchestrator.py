@@ -25,13 +25,15 @@ class Orchestrator:
         except:
              return None
 
-    def _load_system_prompt(self) -> Dict[str, str]:
+    def _load_config(self) -> Dict[str, Any]:
         try:
             with open("config/prompts.yaml", "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-                return config.get("system_prompts", {})
+                return yaml.safe_load(f)
         except Exception:
             return {}
+
+    def _load_system_prompt(self) -> Dict[str, str]:
+        return self._load_config().get("system_prompts", {})
 
     def _classify_intent(self, user_message: str) -> str:
         """
@@ -43,9 +45,11 @@ class Orchestrator:
         router_prompt = self.system_prompt.get("router", "")
         prompt = f"{router_prompt}\n\nUser Input: {user_message}"
         
+        router_model = self._load_config().get("model_config", {}).get("router_model", "gemini-1.5-flash-002")
+        
         try:
             response = self.client.models.generate_content(
-                model="gemini-3-flash-preview",
+                model=router_model,
                 contents=prompt
             )
             intent = response.text.strip().upper()
