@@ -129,3 +129,34 @@ class ProfileManager:
         for key, value in self._profile.get("insights", {}).items():
             context += f"- {key}: {value}\n"
         return context
+    
+    def get_conversation_history(self) -> list:
+        """Returns the conversation history as a list of {role, content} dicts."""
+        return self._profile.get("conversation_history", [])
+    
+    def add_to_history(self, role: str, content: str) -> None:
+        """Adds a message to the conversation history.
+        
+        Args:
+            role: Either 'user' or 'agent'
+            content: The message content
+        """
+        if "conversation_history" not in self._profile:
+            self._profile["conversation_history"] = []
+        
+        self._profile["conversation_history"].append({
+            "role": role,
+            "content": content
+        })
+        self.save_profile()
+    
+    def get_turn_count(self) -> int:
+        """Returns the current turn number (number of user messages)."""
+        history = self.get_conversation_history()
+        # Count only user turns
+        return sum(1 for turn in history if turn.get("role") == "user")
+    
+    def clear_history(self) -> None:
+        """Clears the conversation history (for testing or reset)."""
+        self._profile["conversation_history"] = []
+        self.save_profile()

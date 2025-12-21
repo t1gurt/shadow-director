@@ -6,6 +6,7 @@ from src.agents.orchestrator import Orchestrator
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
+import asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +45,9 @@ client = discord.Client(intents=intents)
 # Orchestrator will be initialized lazily or in main
 orchestrator = None
 
+# Global task variable to prevent duplicate scheduled_observation tasks
+scheduled_observation_task = None
+
 @tasks.loop(hours=168)
 async def scheduled_observation():
     """
@@ -70,44 +74,176 @@ async def scheduled_observation():
 
 @client.event
 async def on_ready():
+    global scheduled_observation_task
+    
     logging.info(f'We have logged in as {client.user}')
-    if not scheduled_observation.is_running():
-        scheduled_observation.start()
+    
+    # Prevent duplicate task execution on reconnection
+    # Only start if task is None or already done
+    if scheduled_observation_task is None or scheduled_observation_task.done():
+        logging.info("Starting scheduled_observation task...")
+        if not scheduled_observation.is_running():
+            scheduled_observation.start()
+        scheduled_observation_task = asyncio.create_task(asyncio.sleep(0))  # Placeholder task
+    else:
+        logging.info("scheduled_observation task is already running, skipping duplicate start")
+
+@client.event
+async def on_guild_channel_create(channel):
+    """
+    Send a welcome message when a new text channel is created.
+    """
+    # Only respond to text channels
+    if not isinstance(channel, discord.TextChannel):
+        return
+    
+    welcome_message = """👋 **NPO-SoulSync AgentのShadow Directorです！**
+
+はじめまして。私はNPOの資金調達を支援するAIエージェントです。
+
+**まず最初に、以下の資料を共有していただけますか？**
+📄 団体の定款
+🌐 ホームページのURL
+📋 活動概要がわかる資料
+
+これらの情報をもとに、貴団体に最適な助成金や資金調達の機会を見つけるお手伝いをします。
+
+**使い方:**
+`@Shadow Director メッセージ` の形式でメンションしてください。
+例: `@Shadow Director こんにちは`
+
+よろしくお願いします！"""
+    
+    try:
+        await channel.send(welcome_message)
+    except Exception as e:
+        logging.error(f"Error sending welcome message: {e}")
 
 @client.event
 async def on_message(message):
     global orchestrator
+    
+    # Ignore messages from the bot itself
     if message.author == client.user:
         return
-
-    user_input = message.content
+    
+    # Only respond when the bot is mentioned
+    if client.user not in message.mentions:
+        return
+    
+    # Deduplication: Check if we're already processing this message
+    # Use a simple in-memory cache with message ID
+    if not hasattr(on_message, 'processing'):
+        on_message.processing = set()
+    
+    if message.id in on_message.processing:
+        logging.info(f"[DEDUP] Message {message.id} is already being processed, skipping")
+        return
+    
+    # Mark as processing
+    on_message.processing.add(message.id)
+    
     try:
-        # Show typing indicator
-        async with message.channel.typing():
-            if orchestrator:
-                # Use channel.id instead of author.id to isolate sessions per channel
-                response = orchestrator.route_message(user_input, str(message.channel.id))
-            else:
-                response = "System initializing... Please wait."
+        # Remove the mention from the message content
+        user_input = message.content.replace(f'<@{client.user.id}>', '').replace(f'<@!{client.user.id}>', '').strip()
         
-        # File attachment logic
-        if "Draft created successfully at:" in response:
-             lines = response.split('\n')
-             file_path = ""
-             for line in lines:
-                 if "Draft created successfully at:" in line:
-                     file_path = line.replace("Draft created successfully at:", "").strip()
-                     break
-             
-             if file_path and os.path.exists(file_path):
-                 file_to_send = discord.File(file_path)
-                 await message.channel.send(response, file=file_to_send)
-                 return
+        # Ignore empty messages after removing mention
+        if not user_input and not message.attachments:
+            return
+        
+        try:
+            # Check if message has attachments or URLs first (before typing indicator)
+            has_attachments = len(message.attachments) > 0
+            has_urls = 'http://' in user_input or 'https://' in user_input
+            
+            # Send progress message for file/URL processing
+            progress_msg = None
+            if has_attachments or has_urls:
+                status_parts = []
+                if has_attachments:
+                    status_parts.append(f"📄 {len(message.attachments)}件のファイル")
+                if has_urls:
+                    import re
+                    url_count = len(re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', user_input))
+                    status_parts.append(f"🔗 {url_count}件のURL")
+                
+                progress_text = " と ".join(status_parts) + " を分析中..."
+                progress_msg = await message.channel.send(f"⏳ {progress_text}")
+                logging.info(f"Processing files/URLs for channel {message.channel.id}: {status_parts}")
+            
+            # Show typing indicator
+            async with message.channel.typing():
+                if orchestrator:
+                    if has_attachments or has_urls:
+                        # Use file/URL processing method
+                        response = await orchestrator.interviewer.process_with_files_and_urls(
+                            user_input, 
+                            str(message.channel.id),
+                            attachments=message.attachments if has_attachments else None
+                        )
+                    else:
+                        # Normal text-only processing
+                        response = orchestrator.route_message(user_input, str(message.channel.id))
+                else:
+                    response = "System initializing... Please wait."
+            
+            # Delete progress message after processing
+            if progress_msg:
+                try:
+                    await progress_msg.delete()
+                except:
+                    pass  # Ignore if already deleted
+            
+            # File attachment logic for drafts
+            if "Draft created successfully at:" in response:
+                 lines = response.split('\n')
+                 file_path = ""
+                 for line in lines:
+                     if "Draft created successfully at:" in line:
+                         file_path = line.replace("Draft created successfully at:", "").strip()
+                         break
+                 
+                 if file_path and os.path.exists(file_path):
+                     file_to_send = discord.File(file_path)
+                     await message.channel.send(response, file=file_to_send)
+                     return
 
-        await message.channel.send(response)
-    except Exception as e:
-        logging.error(f"Error processing message: {e}")
-        await message.channel.send("申し訳ありません、エラーが発生しました。")
+            # Handle long messages (Discord 2000 char limit)
+            MAX_LENGTH = 2000
+            if len(response) > MAX_LENGTH:
+                # Split into chunks
+                chunks = []
+                while response:
+                    if len(response) <= MAX_LENGTH:
+                        chunks.append(response)
+                        break
+                    # Find a good break point (newline or space)
+                    split_pos = response.rfind('\n', 0, MAX_LENGTH)
+                    if split_pos == -1:
+                        split_pos = response.rfind(' ', 0, MAX_LENGTH)
+                    if split_pos == -1:
+                        split_pos = MAX_LENGTH
+                    
+                    chunks.append(response[:split_pos])
+                    response = response[split_pos:].lstrip()
+                
+                # Send chunks
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        await message.channel.send(chunk)
+                    else:
+                        await message.channel.send(f"(...続き {i+1}/{len(chunks)})\n{chunk}")
+            else:
+                await message.channel.send(response)
+                
+        except Exception as e:
+            logging.error(f"Error processing message: {e}")
+            await message.channel.send("申し訳ありません、エラーが発生しました。")
+    finally:
+        # Clean up processing set
+        if message.id in on_message.processing:
+            on_message.processing.remove(message.id)
+            logging.info(f"[DEDUP] Cleaned up message {message.id} from processing set")
 
 def main():
     global orchestrator

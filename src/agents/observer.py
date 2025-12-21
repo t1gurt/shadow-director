@@ -25,12 +25,14 @@ class ObserverAgent:
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
         
         try:
-            self.client = genai.Client(http_options=HttpOptions(api_version="v1"))
+            self.client = genai.Client(http_options=HttpOptions(api_version="v1beta1"))
         except Exception as e:
             print(f"Failed to init GenAI client: {e}")
             self.client = None
             
-        self.model_name = self.config.get("model_config", {}).get("observer_model", "gemini-1.5-flash-002")
+        self.model_name = self.config.get("model_config", {}).get("observer_model")
+        if not self.model_name:
+            raise ValueError("observer_model not found in config")
         self.search_tool = SearchTool()
 
     def _load_config(self) -> Dict[str, Any]:

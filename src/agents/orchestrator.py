@@ -21,7 +21,7 @@ class Orchestrator:
             # Using Flash for routing (Router) as it needs to be fast
             from google import genai
             from google.genai.types import HttpOptions
-            return genai.Client(http_options=HttpOptions(api_version="v1"))
+            return genai.Client(http_options=HttpOptions(api_version="v1beta1"))
         except:
              return None
 
@@ -45,7 +45,9 @@ class Orchestrator:
         router_prompt = self.system_prompt.get("router", "")
         prompt = f"{router_prompt}\n\nUser Input: {user_message}"
         
-        router_model = self._load_config().get("model_config", {}).get("router_model", "gemini-1.5-flash-002")
+        router_model = self._load_config().get("model_config", {}).get("router_model")
+        if not router_model:
+            raise ValueError("router_model not found in config")
         
         try:
             response = self.client.models.generate_content(
@@ -54,6 +56,7 @@ class Orchestrator:
             )
             intent = response.text.strip().upper()
             if "DRAFT" in intent: return "DRAFT"
+            if "OBSERVE" in intent: return "OBSERVE"
             return "INTERVIEW"
         except Exception as e:
             print(f"Routing error: {e}")
@@ -71,8 +74,38 @@ class Orchestrator:
             # Ideally we extract structure, but MVP: Input is the grant info.
             return f"【Drafting Started】\n{self.drafter.create_draft(user_id, user_message)}"
         
+        if intent == "OBSERVE":
+            # Manual Observer trigger
+            return self._run_observer(user_id)
+        
         # Default to Interviewer
-        return self.interviewer.process_message(user_message, user_id, **kwargs)
+        interviewer_response = self.interviewer.process_message(user_message, user_id, **kwargs)
+        
+        # Check if interview just completed
+        if "[INTERVIEW_COMPLETE]" in interviewer_response:
+            # Remove the marker from user-facing response
+            interviewer_response = interviewer_response.replace("[INTERVIEW_COMPLETE]", "")
+            # Auto-trigger Observer
+            observer_results = self._run_observer(user_id)
+            return f"{interviewer_response}\n\n---\n\n【自動分析開始】\n{observer_results}"
+        
+        return interviewer_response
+    
+    def _run_observer(self, user_id: str) -> str:
+        """
+        Runs the Observer and formats the output with next scheduled run info.
+        """
+        from datetime import datetime, timedelta
+        
+        observer_results = self.observer.observe(user_id)
+        
+        # Calculate next scheduled run (weekly)
+        next_run = datetime.now() + timedelta(days=7)
+        next_run_str = next_run.strftime("%Y年%m月%d日")
+        
+        footer = f"\n\n💡 **次回の自動観察予定**: {next_run_str}\n（手動で観察を実行したい場合は「助成金を探して」と送信してください）"
+        
+        return observer_results + footer
 
     def run_periodic_checks(self) -> List[Tuple[str, str]]:
         """

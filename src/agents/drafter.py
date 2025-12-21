@@ -21,7 +21,7 @@ class DrafterAgent:
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
         
         try:
-            self.client = genai.Client(http_options=HttpOptions(api_version="v1"))
+            self.client = genai.Client(http_options=HttpOptions(api_version="v1beta1"))
         except Exception as e:
             print(f"Failed to init GenAI client: {e}")
             self.client = None
@@ -29,7 +29,9 @@ class DrafterAgent:
         # Using Interviewer model (Pro) for drafting as it requires high reasoning/writing capability
         # Or we can define a separate drafter_model in config if needed. 
         # For now, reusing interviewer_model or defaulting to gemini-2.5-pro
-        self.model_name = self.config.get("model_config", {}).get("interviewer_model", "gemini-1.5-pro-002")
+        self.model_name = self.config.get("model_config", {}).get("interviewer_model")
+        if not self.model_name:
+             raise ValueError("interviewer_model (for drafter) not found in config")
         self.docs_tool = GoogleDocsTool()
 
     def _load_config(self) -> Dict[str, Any]:

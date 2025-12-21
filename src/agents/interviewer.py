@@ -1,9 +1,11 @@
 from typing import Dict, Any, List, Optional
 import yaml
 import os
+import re
 from google import genai
-from google.genai.types import HttpOptions
+from google.genai.types import HttpOptions, File
 from src.memory.profile_manager import ProfileManager
+from src.tools.file_processor import FileProcessor
 
 class InterviewerAgent:
     def __init__(self, profile_manager: Optional[ProfileManager] = None):
@@ -30,12 +32,17 @@ class InterviewerAgent:
         
         print(f"Initializing Interviewer with google-genai SDK. Project: {project_id}, Location: {location}")
         try:
-            self.client = genai.Client(http_options=HttpOptions(api_version="v1"))
+            self.client = genai.Client(http_options=HttpOptions(api_version="v1beta1"))
         except Exception as e:
             print(f"Failed to init GenAI client: {e}")
             self.client = None
         
-        self.model_name = self.config.get("model_config", {}).get("interviewer_model", "gemini-1.5-pro-002")
+        self.model_name = self.config.get("model_config", {}).get("interviewer_model")
+        if not self.model_name:
+             raise ValueError("interviewer_model not found in config")
+        
+        # Initialize File Processor
+        self.file_processor = FileProcessor(self.client) if self.client else None
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -48,22 +55,36 @@ class InterviewerAgent:
     def process_message(self, user_message: str, user_id: str, turn_count: int = 1) -> str:
         """
         Processes the user message using Vertex AI Gemini model (google-genai SDK).
+        Now includes conversation history for context continuity.
         """
         # Instantiate ProfileManager for this specific user
         pm = ProfileManager(user_id=user_id)
         current_profile = pm.get_profile_context()
         
+        # Get conversation history and calculate actual turn count
+        history = pm.get_conversation_history()
+        actual_turn_count = pm.get_turn_count() + 1  # +1 for the current turn
+        
         # Format the system prompt with turn_count
-        prompt_content = self.system_prompt.replace("{turn_count}", str(turn_count))
+        prompt_content = self.system_prompt.replace("{turn_count}", str(actual_turn_count))
 
-        # Construct the full prompt for the LLM
+        # Build conversation history context
+        history_context = ""
+        if history:
+            history_context = "\n【これまでの会話履歴】\n"
+            for turn in history:
+                role_label = "ユーザー" if turn["role"] == "user" else "エージェント"
+                history_context += f"{role_label}: {turn['content']}\n"
+            history_context += "\n"
+
+        # Construct the full prompt for the LLM with history
         full_prompt = f"""
 {prompt_content}
 
 {current_profile}
 
-User: {user_message}
-Agent:
+{history_context}ユーザー: {user_message}
+エージェント:
 """
         try:
             # 1. Generate response to user
@@ -73,13 +94,173 @@ Agent:
             )
             response_text = response.text
 
-            # 2. Extract and save insights (Fire and forget, or sequential)
-            # For mock, sequential is fine.
-            self._extract_insights(user_message, response_text, user_id, pm)
+            # 2. Check if this is an interview question (has understanding level marker)
+            # Only count as a turn if it contains understanding level display
+            is_interview_question = "[設立者の魂理解度:" in response_text or "[理解度:" in response_text
+            
+            # 3. Save this turn to conversation history
+            pm.add_to_history("user", user_message)
+            pm.add_to_history("agent", response_text)
+            
+            # 4. Only increment turn_count if this is an actual interview question
+            # Greetings, clarifications, and thank-you messages won't count
+            if is_interview_question:
+                # Extract and save insights (Fire and forget, or sequential)
+                self._extract_insights(user_message, response_text, user_id, pm)
+
+                # Check if interview is complete (15 turns)
+                if actual_turn_count >= 15:
+                    response_text += "\n\n[INTERVIEW_COMPLETE]"
+            else:
+                # This is a greeting/clarification - don't count it as a turn
+                # The turn_count will remain the same, so next actual question will use the same number
+                print(f"[DEBUG] Response is not an interview question (no understanding level marker), not counting as turn")
 
             return response_text
         except Exception as e:
             return f"Error communicating with AI: {e}"
+    
+    
+    async def process_with_files_and_urls(self, user_message: str, user_id: str, 
+                                           attachments: List[Any] = None, 
+                                           turn_count: int = 1) -> str:
+        """
+        Process message with file attachments and/or URLs, then continue with interview.
+        
+        Args:
+            user_message: User's text message
+            user_id: User/Channel ID
+            attachments: Discord attachments list
+            turn_count: Current turn number
+            
+        Returns:
+            Response text with document analysis + interview question
+        """
+        if not self.file_processor:
+            # Fallback to normal interview if file processor unavailable
+            return self.process_message(user_message, user_id, turn_count)
+        
+        pm = ProfileManager(user_id=user_id)
+        
+        # Extract URLs from message
+        urls = self.file_processor.extract_urls(user_message)
+        print(f"[DEBUG] Extracted URLs from message: {urls}")
+        
+        # Process attachments if any
+        uploaded_files = []
+        if attachments:
+            print(f"[DEBUG] Found {len(attachments)} attachments")
+            for att in attachments:
+                print(f"[DEBUG]   - Attachment: {att.filename} ({att.content_type}, {att.size} bytes, URL: {att.url})")
+            try:
+                uploaded_files = await self.file_processor.process_discord_attachments(attachments)
+                print(f"[DEBUG] Successfully uploaded {len(uploaded_files)} files to Gemini")
+            except Exception as e:
+                print(f"[ERROR] Attachment processing error: {e}")
+                # File processing failed - inform user and don't count this as a turn
+                error_response = f"申し訳ありません。ファイルの読み込みに失敗しました。\n\nエラー: {str(e)}\n\n通常の対話形式で情報を教えていただけますか？"
+                # Save error message to history but don't increment turn
+                pm.add_to_history("user", user_message + " [添付ファイルあり]")
+                pm.add_to_history("agent", error_response)
+                return error_response
+        
+        # If no files/URLs, just do normal interview
+        if not uploaded_files and not urls:
+            print(f"[DEBUG] No files or URLs detected, proceeding with normal interview")
+            return self.process_message(user_message, user_id, turn_count)
+        
+        print(f"[DEBUG] Starting document analysis - {len(uploaded_files)} files, {len(urls)} URLs")
+        
+        # Build analysis prompt
+        analysis_parts = []
+        
+        # Add files to prompt
+        for file in uploaded_files:
+            analysis_parts.append(file)
+        
+        # Build text instruction
+        instruction = f"""
+以下の資料から団体の情報を抽出してください：
+
+【抽出する情報】
+- 団体名
+- 設立年月日
+- 活動目的・ミッション
+- 主な活動内容
+- 対象者・受益者
+- 特徴・強み
+
+【資料】
+"""
+        
+        if urls:
+            instruction += f"\n📎 URL: {', '.join(urls)}\n"
+        
+        if uploaded_files:
+            instruction += f"\n📄 添付ファイル: {len(uploaded_files)}件\n"
+        
+        instruction += f"\n【ユーザーメッセージ】\n{user_message}"
+        instruction += "\n\n抽出した情報を簡潔にまとめて報告してください。"
+        
+        analysis_parts.append(instruction)
+        
+        try:
+            # Analyze documents
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=analysis_parts
+            )
+            
+            analysis_result = response.text
+            
+            # Save document analysis to conversation history
+            pm.add_to_history("user", f"[資料提供] {user_message}")
+            pm.add_to_history("agent", f"[資料分析] {analysis_result}")
+            
+            # Extract insights from the analysis
+            self._extract_insights(user_message, analysis_result, user_id, pm)
+            
+            # Now continue with interview based on the analyzed information
+            # Get updated profile
+            current_profile = pm.get_profile_context()
+            actual_turn_count = pm.get_turn_count() + 1
+            
+            # Build interview prompt with analyzed info
+            prompt_content = self.system_prompt.replace("{turn_count}", str(actual_turn_count))
+            
+            interview_prompt = f"""
+{prompt_content}
+
+{current_profile}
+
+【これまでの経緯】
+資料を分析し、以下の情報を取得しました：
+{analysis_result[:300]}...
+
+上記の情報を踏まえて、さらに深く理解するための質問を1つしてください。
+既に分かっている情報は繰り返し聞かないでください。
+"""
+            
+            # Generate interview question
+            interview_response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=interview_prompt
+            )
+            
+            interview_question = interview_response.text
+            
+            # Save interview turn
+            pm.add_to_history("agent", interview_question)
+            
+            # Combine document analysis + interview question
+            full_response = f"📚 **資料を分析しました**\n\n{analysis_result}\n\n---\n\n{interview_question}"
+            
+            return full_response
+            
+        except Exception as e:
+            print(f"Document analysis error: {e}")
+            # Fallback to normal interview
+            return self.process_message(user_message, user_id, turn_count)
 
     def _extract_insights(self, user_input: str, agent_response: str, user_id: str, pm: ProfileManager) -> None:
         """
