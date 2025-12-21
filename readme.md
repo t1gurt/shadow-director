@@ -1,229 +1,325 @@
-🤝 NPO-SoulSync Agent: The Autonomous "Shadow Director"
-"熱意はあるが、時間がない" すべてのソーシャルリーダーへ。 Google Cloud の最先端（Gemini 3.0 & ADK）を駆使し、あなたの「魂（Soul）」を学習・自律行動する、分身パートナー。
+# 🤝 NPO-SoulSync Agent: The Autonomous "Shadow Director"
 
-(https://img.shields.io/badge/Built_with-Agent_Development_Kit-orange?logo=google-cloud)](https://google.github.io/adk-docs/)
+**「熱意はあるが、時間がない」すべてのソーシャルリーダーへ。**
 
-📖 概要 (Overview)
-NPO法人の代表者は、想いと行動力を持ちながらも、常に事務作業とリソース不足に忙殺されています。 本プロダクトは、従来の「人間が使うツール」ではありません。Discord上に常駐し、代表者の「判断基準」と「原体験」を深い対話を通じて学習。その後は "Shadow Director（影の事務局長）" として、自律的に外部環境を監視し、チャンスを掴み取りに行きます。
+Google Cloud の最先端（Gemini 3.0 & Vertex AI）を駆使し、あなたの「魂（Soul）」を学習・自律行動する、分身パートナー。
 
-本プロジェクトは、Google Agent Development Kit (ADK) をフレームワークに採用し、Gemini 3.0 Pro の推論能力と Vertex AI Agent Engine のマネージド機能を極限まで引き出した、次世代の自律型エージェント（Agentic AI）実装です。
+[![Built with Google Cloud](https://img.shields.io/badge/Built_with-Google_Cloud-4285F4?logo=google-cloud)](https://cloud.google.com/vertex-ai)
+[![Gemini 3.0](https://img.shields.io/badge/Gemini-3.0_Pro-orange)](https://deepmind.google/technologies/gemini/)
 
-🏆 Zenn Agentic AI Hackathon 第4回 戦略ターゲット
-Theme: Agentic AI (自律性・推論・ツール利用・マルチエージェント協調)
+## 📖 概要 (Overview)
 
-Cutting-Edge Tech Stack:
+NPO法人の代表者は、想いと行動力を持ちながらも、常に事務作業とリソース不足に忙殺されています。
 
-Gemini 3.0 Pro (Preview): 圧倒的な推論・コーディング能力で、複雑な文脈理解とドラフト作成を担当 。
+本プロダクトは、従来の「人間が使うツール」ではありません。Discord上に常駐し、代表者の「判断基準」と「原体験」を深い対話を通じて学習。その後は **"Shadow Director（影の事務局長）"** として、自律的に外部環境を監視し、チャンスを掴み取りに行きます。
 
-Gemini 2.5 Flash: コストと速度のバランスに優れ、"Thinking Budget" を制御可能な常時監視エージェントとして採用 。
+本プロジェクトは、**Google Gemini 3.0 Pro** の推論能力と **Vertex AI** のマネージド機能を極限まで引き出した、次世代の自律型エージェント（Agentic AI）実装です。
 
-Google ADK (Agent Development Kit): Googleが開発した最新のエージェント構築フレームワーク。
+## 🏆 Zenn Agentic AI Hackathon 第4回
 
-Vertex AI Agent Engine (GA): 2025年12月に一般提供開始されたばかりの「Sessions」と「Memory Bank」機能をフル活用し、堅牢な状態管理を実現 。
+**Theme:** Agentic AI (自律性・推論・ツール利用・マルチエージェント協調)
 
-Dynamic Retrieval: Gemini 3.0の判断で「検索が必要な時だけ検索する」コスト最適化された自律検索 。
+### 最先端技術スタック:
 
-✨ Agentic Core Features (主な機能)
-1. 🗣️ The Soul Sync (Interview Agent)
-「設定ファイルは書かない。対話して、魂を同期する。」
+- **Gemini 3.0 Pro (Preview)**: 圧倒的な推論・コーディング能力で、複雑な文脈理解とドラフト作成を担当
+- **Gemini 3.0 Flash (Preview)**: コストと速度のバランスに優れ、常時監視エージェントとして採用
+- **Vertex AI**: Google Cloudの最新AIプラットフォーム、本番グレードのスケーラビリティを提供
+- **Google Search Grounding**: Dynamic Retrievalによるリアルタイム情報取得
+- **Google Cloud Run**: フルマネージドなコンテナ実行環境、自動スケーリング対応
 
-Tech: Gemini 3.0 Pro + Vertex AI Memory Bank (GA)
+## ✨ 実装済み機能 (Implemented Features)
 
-Behavior: アップロードされた定款やHPを読み込み、Gemini 3.0 Proが「書かれていない代表の想い（原体験）」を特定。Active Inquiryにより、「なぜその活動が必要なのか？」「一番悔しかったことは？」など、核心を突く質問を能動的に投げかけます。
+### 1. 🗣️ The Soul Sync (Interview Agent) - ✅ Implemented
 
-Innovation: 対話結果は単純なテキストログではなく、構造化された「信念プロファイル」として Vertex AI Memory Bank に永続化され、全エージェントで共有されます 。
+**「設定ファイルは書かない。対話して、魂を同期する。」**
 
-2. 🦅 Autonomous Funding Watch (Observer Agent)
-「あなたが寝ている間に、チャンスを見つけ出す。」
+- **Tech:** Gemini 3.0 Pro + GCS Storage
+- **Features:**
+  - **PDF/URLドキュメント分析**: 定款・団体HPなどを自動読み込み・理解
+  - **Active Inquiry**: AIが「書かれていない代表の想い（原体験）」を特定し、核心を突く質問を投げかける
+  - **選択的ターンカウント**: 挨拶や補足説明はカウントせず、実質的なインタビュー質問のみを15問でカウント
+  - **構造化プロファイル**: 対話結果を構造化し、GCS (Google Cloud Storage) に永続化
+  - **会話履歴管理**: ターン数とコンテキストを保持し、自然な対話を実現
 
-Tech: Gemini 2.5 Flash + Dynamic Retrieval Grounding
+### 2. 🦅 Autonomous Funding Watch (Observer Agent) - ✅ Implemented
 
-Behavior:
+**「あなたが寝ている間に、チャンスを見つけ出す。」**
 
-Smart Observation: Google Search Groundingを活用し、助成金情報や企業のCSR活動を定期監視。
+- **Tech:** Gemini 3.0 Flash + Google Search Grounding
+- **Features:**
+  - **Google Search Grounding**: 助成金情報や企業のCSR活動を検索
+  - **Resonance Reasoning**: 財団の理念と自団体の「Soul Profile」の共鳴度（マッチ度）を推論
+  - **自律的トリガー**: ユーザーが「助成金を探して」と言うか、インタビュー完了時に自動実行
+  - **週次スケジュール**: Discord Tasks Loopによる定期実行（168時間/週）
 
-Dynamic Retrieval: 常に検索するのではなく、エージェントが「自身の知識で判断できない」と確信した場合（Confidence Score < Threshold）のみ検索を実行。Gemini 2.5 Flashの高速性を活かしつつ、最新情報を逃しません 。
+### 3. ✍️ Shadow Drafter (Action Agent) - ✅ Implemented
 
-Resonance Reasoning: 単なるキーワード一致ではなく、財団の理念と自団体の「Soul Profile」の共鳴度（マッチ度）を推論します。
+**「『とりあえず書いておいたよ』と言えるエージェント。」**
 
-3. ✍️ Shadow Drafter (Action Agent)
-「『とりあえず書いておいたよ』と言えるエージェント。」
+- **Tech:** Gemini 3.0 Pro + Google Docs API
+- **Features:**
+  - **自動ドラフト生成**: Soul Profileを基に助成金申請書のドラフトを作成
+  - **Google Docs統合**: 生成されたドラフトをGoogle Docsとして出力
+  - **インテリジェントルーティング**: ユーザーの発言から「DRAFT」意図を自動検出
 
-Tech: Gemini 3.0 Pro + ADK Tool Use
+### 4. 🛡️ Production-Ready Infrastructure - ✅ Implemented
 
-Behavior: マッチ度が高い案件について、Memory Bank内の過去の実績や代表のエピソードを引用し、Gemini 3.0 Proの高い言語能力で「採択されやすい申請書ドラフト」を自動生成。Google Docs APIを通じて即座に共有します。
+- **Cloud Run Deployment**: フルマネージド、自動スケーリング
+  - **Single Instance Mode**: Discord Bot用に `max-instances=1` 設定で重複接続を防止
+  - **Always-On**: `min-instances=1` でコールドスタート防止
+- **GCS Storage**: プロファイルデータの永続化（`gs://zenn-shadow-director-data`）
+- **Health Check**: HTTP ヘルスチェックサーバー内蔵
+- **Message Deduplication**: メッセージIDベースの重複処理防止機構
 
-🏗️ システム構成 (Architecture)
-最新の Google Agent Development Kit (ADK) を採用し、スケーラブルかつモジュラーなマルチエージェントシステムを構築しています。
-ユーザー（NPO代表）とエージェントが協働する「デジタルオフィス」として Discord を採用。
+## 🏗️ システム構成 (Architecture)
+
+現在の実装は、Google Cloud上で動作するシンプルかつスケーラブルな構成です。
 
 ```mermaid
 graph TD
-    User(("NPO Representative")) -->|"Chat & Upload"| Discord
+    User((NPO Representative)) -->|Chat & Upload| Discord
     
     subgraph "Interface Layer"
-        Discord["Discord Bot (Python)"]
-        Discord -->|Webhook| PubSub
+        Discord[Discord Bot]
     end
 
-    subgraph "Brain Layer (Vertex AI)"
-        PubSub -->|Trigger| AgentCore["Agent Core (Cloud Run)"]
+    subgraph "Brain Layer (Cloud Run)"
+        Discord -->|Message Event| Orchestrator[Orchestrator Agent]
         
-        AgentCore -->|"Deep Reasoning"| GeminiPro["Gemini 3.0 Pro"]
-        AgentCore -->|"Fast Response"| GeminiFlash["Gemini 3.0 Flash"]
+        Orchestrator -->|Route: INTERVIEW| Interviewer[Interviewer Agent]
+        Orchestrator -->|Route: OBSERVE| Observer[Observer Agent]
+        Orchestrator -->|Route: DRAFT| Drafter[Drafter Agent]
         
-        GeminiPro <-->|"Long Context"| ContextCache[("Context Cache\nSoul Profile + Articles")]
-        GeminiPro -->|"Real-time Data"| Grounding["Grounding with Google Search"]
+        Interviewer -->|Deep Reasoning| GeminiPro[Gemini 3.0 Pro]
+        Observer -->|Fast + Search| GeminiFlash[Gemini 3.0 Flash]
+        Drafter -->|Document Gen| GeminiPro
+        
+        GeminiFlash -->|Grounding| GoogleSearch[Google Search]
+    end
+
+    subgraph "Storage Layer"
+        Interviewer <-->|Save/Load Profile| GCS[(Google Cloud Storage)]
+        Observer <-->|Read Profile| GCS
+        Drafter <-->|Read Profile| GCS
     end
 
     subgraph "Action Layer"
-        AgentCore -->|"Post Notification"| Discord
-        AgentCore -->|"Create Doc"| GDrive["Google Docs API"]
+        Drafter -->|Create Doc| GDocs[Google Docs API]
+        Orchestrator -->|Send Response| Discord
     end
-
-    Scheduler["Cloud Scheduler"] -->|"Periodic Trigger"| AgentCore
+    
+    subgraph "Scheduling"
+        Tasks[Discord Tasks Loop] -->|Weekly Trigger| Observer
+    end
 ```
 
-🛠️ 技術スタック (Tech Stack)
-* LLM: Google Gemini 3.0 Pro (推論・執筆・戦略立案), Gemini 3.0 Flash (チャット・一次選別)
+## 🛠️ 技術スタック (Tech Stack)
 
-* Why 3.0 Pro? : 助成金の「募集要項の裏にある意図」を読み解く文脈理解力と、数千件の情報を裁く処理速度の両立のため。
+### LLM & AI
+- **Gemini 3.0 Pro (Preview)**: 推論・執筆・戦略立案（インタビュアー、ドラフター）
+- **Gemini 3.0 Flash (Preview)**: チャット・検索・一次選別（オブザーバー）
+- **Google Search Grounding**: リアルタイム情報検索
 
-* Platform: Google Cloud (Vertex AI, Cloud Run, Pub/Sub, Cloud Scheduler)
+### Platform & Infrastructure
+- **Google Cloud Run**: フルマネージドコンテナ実行環境
+  - Region: `us-central1`
+  - Instances: `min=1, max=1` (Discord Bot用シングルトン構成)
+  - Memory: `1Gi`
+- **Google Cloud Storage (GCS)**: プロファイルデータ永続化
+  - Bucket: `gs://zenn-shadow-director-data`
+- **Vertex AI**: Gemini API アクセス（`google-genai` SDK with Vertex AI backend）
 
-* Interface: Discord.py
+### Development
+- **Language**: Python 3.10
+- **Framework**: `discord.py` (Discord Bot), `google-genai` (Gemini SDK)
+- **Containerization**: Docker + Cloud Build
 
-* Framework: LangChain or Firebase Genkit (検討中)
-
-📂 ディレクトリ構成 (Directory Structure)
-本リポジトリは、Google ADK (Python) の標準構成に準拠しています。
+## 📂 ディレクトリ構成 (Directory Structure)
 
 ```text
-.
- ├── README.md
- ├── pyproject.toml # 依存関係 (google-adk, etc.)
- ├── main.py # Discord Gateway Entrypoint
- ├── adk_deploy.sh # Agent Engine デプロイ用スクリプト
- ├── src
- │ ├── agents
- │ │ ├── init.py
- │ │ ├── orchestrator.py # ルーティングロジック
- │ │ ├── interviewer.py # Gemini 3.0 Pro 定義
- │ │ ├── observer.py # Gemini 2.5 Flash + Search定義
- │ │ └── drafter.py # ドキュメント生成定義
- │ ├── tools
- │ │ ├── search_tool.py # Dynamic Retrieval Config設定
- │ │ └── gdocs_tool.py # Google Docs API Tool
- │ └── memory
- │ └── profile_manager.py # Memory Bank 操作用
- └── config
- └── prompts.yaml # 各エージェントのシステムプロンプト
+shadow-director/
+├── README.md                     # このファイル
+├── Dockerfile                    # Cloud Run デプロイ用
+├── deploy_cloudrun.sh            # デプロイスクリプト
+├── pyproject.toml                # 依存関係
+├── main.py                       # Discord Bot エントリーポイント
+├── .agent/
+│   └── workflows/
+│       └── deploy_on_wsl.md      # WSLデプロイワークフロー
+├── src/
+│   ├── agents/
+│   │   ├── orchestrator.py       # ルーティングロジック
+│   │   ├── interviewer.py        # インタビューエージェント (Gemini 3.0 Pro)
+│   │   ├── observer.py           # 監視エージェント (Gemini 3.0 Flash + Search)
+│   │   └── drafter.py            # ドラフト生成エージェント (Gemini 3.0 Pro)
+│   ├── tools/
+│   │   ├── file_processor.py     # PDF/URL処理ユーティリティ
+│   │   ├── search_tool.py        # Google Search Grounding設定
+│   │   └── gdocs_tool.py         # Google Docs API Tool
+│   └── memory/
+│       └── profile_manager.py    # GCS操作 (プロファイル管理)
+└── config/
+    └── prompts.yaml              # 各エージェントのシステムプロンプト
 ```
 
-🗓️ 開発ロードマップ (Roadmap)
+## 🗓️ 開発ロードマップ (Roadmap)
 
 ### Phase 1: The Soul Sync (Foundation) - ✅ Complete
-- [x] **Project Setup**: ADKディレクトリ構成と環境設定
-- [x] **Mock Runner**: Discordなしでロジック検証を行うCLIツールの実装
-- [x] **Interviewer Agent**:
-    - [x] Gemini 2.5 Pro (via Vertex AI) による深層インタビューロジック
-    - [x] 会話からの「Insight (原体験・Mission)」抽出と構造化データの保存 (Local JSON)
-    - [x] インタビュー制御 (最大質問数制限、理解度表示)
-- [x] **Profile Manager**: ローカル環境(JSON)と本番環境(GCS)の抽象化レイヤー
+- [x] Project Setup & Environment Configuration
+- [x] Interviewer Agent
+  - [x] Gemini 3.0 Pro インタビューロジック
+  - [x] **PDF/URLドキュメント処理** (Vertex AI Part API)
+  - [x] **選択的ターンカウント** (理解度マーカー検出)
+  - [x] 会話履歴管理 & ターンカウント
+  - [x] Insight抽出と構造化データ保存
+- [x] Profile Manager
+  - [x] ローカル環境(JSON)とGCS環境の抽象化
+  - [x] GCS統合 (`gs://zenn-shadow-director-data`)
 
 ### Phase 2: The Observer (Autonomy) - ✅ Complete
-- [x] **Observer Agent (Logic)**:
-    - [x] 助成金情報とSoul Profileの「共鳴度(Resonance Score)」判定プロンプト
-- [x] **Observer Agent (Tools)**:
-    - [x] Google Search Grounding / Dynamic Retrieval の完全統合
-    - [x] 検索クエリの自律生成ロジック (`_generate_queries`)
-- [x] **Orchestrator**: 
-    - [x] Periodic Checks logic Implementation
-- [x] **Scheduling**:
-    - [x] Discord Tasks Loop による定期実行トリガー (168h/Weekly)
+- [x] Observer Agent
+  - [x] Google Search Grounding統合
+  - [x] Resonance Score判定ロジック
+  - [x] 自律的検索クエリ生成
+- [x] Scheduling
+  - [x] Discord Tasks Loop (週次実行)
+  - [x] マニュアルトリガー (`/observe` コマンド相当)
 
-### Phase 3: The Action & Interface (Integration) - ✅ Complete
-- [x] **Drafter Agent**:
-    - [x] 申請書ドラフト生成ロジック (`src/agents/drafter.py`)
-    - [x] Mock Google Docs Output (`src/tools/gdocs_tool.py`)
-- [x] **Discord Integration**:
-    - [x] Discord Bot UI (PyCord / Discord.py) の実装
-    - [x] 非同期通知システム
-- [x] **Deployment** (Complete):
-    - [x] Dockerfile & Deployment Scripts (`Dockerfile`, `deploy_cloudrun.sh`)
-    - [x] Vertex AI Agent Engine Integration
-    - [x] Cloud Run Hosting (`https://shadow-director-bot-182793624818.us-central1.run.app`)
-### Phase 6: Deployment Preparation - ✅ Complete
-- [x] **Containerization**:
-    - [x] Dockerfile & .dockerignore
-- [x] **Deployment Scripts**:
-    - [x] `deploy_cloudrun.sh` (Google Cloud Run)
-- [x] **Production Release** (See `docs/NEXT_STEPS.md`):
-    - [x] Execute Deployment to Google Cloud
-    - [ ] Discord Real-world Testing (In Progress)
+### Phase 3: The Action & Interface - ✅ Complete
+- [x] Drafter Agent
+  - [x] 申請書ドラフト生成ロジック
+  - [x] Google Docs API統合
+- [x] Discord Integration
+  - [x] Discord Bot UI (メンション対応)
+  - [x] **進捗メッセージ表示** (ファイル/URL分析中)
+  - [x] **メッセージ重複処理防止**
+  - [x] 長文応答の自動分割 (2000文字制限対応)
+- [x] Intelligent Routing
+  - [x] Router Prompt (INTERVIEW / OBSERVE / DRAFT 判定)
+  - [x] インタビュー完了時の自動Observer起動
 
-🚀 Deployment (Google Cloud Run)
+### Phase 6-9: Production Deployment - ✅ Complete
+- [x] Containerization (Dockerfile)
+- [x] Cloud Run Deployment
+  - [x] **シングルインスタンス設定** (Discord Bot用)
+  - [x] **ヘルスチェックサーバー**
+  - [x] **環境変数管理**
+- [x] Gemini 3.0 Migration
+  - [x] `google-genai` SDK with Vertex AI
+  - [x] `api_version="v1beta1"` 設定
+  - [x] Gemini 3.0 Pro/Flash モデル利用
 
-本番環境(Google Cloud Run)へのデプロイ手順です。
+## 🚧 未実装機能 (Not Implemented Yet)
+
+以下の機能は将来の拡張として検討中です：
+
+- [ ] **Vertex AI Memory Bank**: 現在はGCSを使用していますが、将来的にMemory Bank APIへの移行を検討
+- [ ] **Context Caching**: 長文プロファイルの効率的な再利用
+- [ ] **Multi-Tenant Support**: 複数のNPO団体を同時サポート（現在はチャネルベースの分離のみ）
+- [ ] **Advanced Analytics**: プロファイルデータの可視化・分析ダッシュボード
+- [ ] **Webhook Integration**: 外部サービス（Slack, Teams等）との連携
+
+## 🚀 Getting Started
+
+### Prerequisites
+- Python 3.10+
+- Google Cloud Project (Vertex AI API enabled)
+- Gemini 3.0 Pro/Flash Preview Access
+- Discord Bot Token
+
+### Installation
+
+1. **Clone the repository**
+```bash
+git clone https://github.com/yourusername/shadow-director.git
+cd shadow-director
+```
+
+2. **Install Dependencies**
+```bash
+pip install -e .
+```
+
+3. **Configure Environment**
+```bash
+cp .env.example .env
+# Edit .env with your credentials:
+# - DISCORD_BOT_TOKEN
+# - GOOGLE_CLOUD_PROJECT
+# - GCS_BUCKET_NAME
+```
+
+4. **Local Development**
+```bash
+python main.py
+```
+
+## 🚀 Deployment (Google Cloud Run)
 
 ### 1. Prerequisites
-- Google Cloud SDK (`gcloud`) installed & authenticated.
-- Docker installed.
+- Google Cloud SDK (`gcloud`) installed & authenticated
+- Docker installed
 
 ### 2. Setup Google Cloud Project
 ```bash
 # Login to Google Cloud
 gcloud auth login
-gcloud config set project zenn-shadow-director
+gcloud config set project YOUR_PROJECT_ID
 
 # Enable APIs
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com aiplatform.googleapis.com
+gcloud services enable run.googleapis.com \
+  cloudbuild.googleapis.com \
+  aiplatform.googleapis.com \
+  storage.googleapis.com
 ```
 
-### 3. Deploy
-付属のスクリプトを使用することで、ビルドからデプロイまでを一括で行えます。
-
+### 3. Create GCS Bucket
 ```bash
-# Linux / WSL / Git Bash
-bash deploy_cloudrun.sh
+gsutil mb -l us-central1 gs://YOUR-BUCKET-NAME
 ```
 
-**Note:** `deploy_cloudrun.sh` 内の `REGION` や `PROJECT_ID` は適宜修正してください。
-また、本番運用時は `DISCORD_BOT_TOKEN` を [Secret Manager](https://cloud.google.com/secret-manager/docs/creating-and-accessing-secrets) 経由で渡すことを強く推奨します。
+### 4. Build & Deploy
+```bash
+# Build Docker image
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/shadow-director-bot
 
-### 4. Discord Bot Setup (Invitation)
-Botをサーバーに招待するための手順です。
+# Deploy to Cloud Run
+gcloud run deploy shadow-director-bot \
+  --image gcr.io/YOUR_PROJECT_ID/shadow-director-bot \
+  --region us-central1 \
+  --platform managed \
+  --allow-unauthenticated \
+  --memory 1Gi \
+  --max-instances 1 \
+  --min-instances 1 \
+  --set-env-vars "APP_ENV=production,GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=True,GCS_BUCKET_NAME=YOUR-BUCKET-NAME,DISCORD_BOT_TOKEN=YOUR_TOKEN"
+```
 
-1. [Discord Developer Portal](https://discord.com/developers/applications) にアクセス。
-2. アプリケーションを選択し、左メニューの **OAuth2** -> **URL Generator** をクリック。
-3. **SCOPES** で `bot` にチェックを入れる。
-4. **BOT PERMISSIONS** で以下にチェックを入れる（または `Administrator`）:
-    - `Send Messages`
-    - `Read Message History`
-    - `Attach Files` (ドラフト送付用)
-    - `View Channels`
-5. 生成された URL をブラウザで開き、自分のサーバーに追加する。
+**Note:** For production, use [Secret Manager](https://cloud.google.com/secret-manager) for sensitive values like `DISCORD_BOT_TOKEN`.
 
-### 5. Verify
-デプロイ完了後、Discord Bot がオンラインになり、メンションやDMに応答することを確認してください。
+### 5. Discord Bot Setup
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Select your application → **OAuth2** → **URL Generator**
+3. Select scopes: `bot`
+4. Select permissions:
+   - `Send Messages`
+   - `Read Message History`
+   - `Attach Files`
+   - `View Channels`
+5. Use generated URL to invite bot to your server
 
-🚀 Getting Started
-Prerequisites
-Python 3.10+
+## � Current Deployment Status
 
-Google Cloud Project (Vertex AI API enabled)
+**Environment:** Production (Google Cloud Run)
+- **Service URL:** `https://shadow-director-bot-182793624818.us-central1.run.app`
+- **Latest Revision:** `shadow-director-bot-00042-xzk`
+- **Region:** `us-central1`
+- **Status:** ✅ Active
 
-Gemini 3.0 Pro Preview Access (enabled via Vertex AI)
+## 📝 License
 
-Discord Bot Token
+This project is built for Zenn Agentic AI Hackathon 2025.
 
-Installation
-Clone the repository
+---
 
-Install ADK & Dependencies:
-
-Configure Environment:
-
-Run Locally (ADK Runner):
-
-Built with ❤️ for Zenn Agentic AI Hackathon 2025
+**Built with ❤️ for Zenn Agentic AI Hackathon 2025**
