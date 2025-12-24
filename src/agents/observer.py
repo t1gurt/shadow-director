@@ -1,6 +1,7 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import yaml
 import os
+import re
 from google import genai
 from google.genai.types import HttpOptions, GenerateContentConfig
 from src.tools.search_tool import SearchTool
@@ -66,8 +67,63 @@ Output ONLY the queries, one per line.
         except Exception as e:
             print(f"Error generating queries: {e}")
             return [f"NPO grants {profile[:50]}..."] # Fallback
+    
+    def _parse_opportunities(self, text: str) -> List[Dict]:
+        """
+        Parse structured opportunity data from Observer response.
+        Expected format:
+        ### 機会 N: [助成金名]
+        - **URL**: [URL]
+        - **金額**: [金額]
+        - **共鳴スコア**: [数値]
+        - **共鳴理由**: [理由]
+        
+        Returns:
+            List of opportunity dictionaries
+        """
+        opportunities = []
+        
+        # Split by ### 機会 pattern
+        sections = re.split(r'###\s*機会\s*\d+:', text)
+        
+        for section in sections[1:]:  # Skip first empty section
+            try:
+                # Extract title (first line)
+                lines = section.strip().split('\n')
+                title = lines[0].strip() if lines else "不明"
+                
+                # Extract URL
+                url_match = re.search(r'\*\*URL\*\*:\s*(.+)', section)
+                url = url_match.group(1).strip() if url_match else "N/A"
+                
+                # Extract amount
+                amount_match = re.search(r'\*\*金額\*\*:\s*(.+)', section)
+                amount = amount_match.group(1).strip() if amount_match else "N/A"
+                
+                # Extract resonance score
+                score_match = re.search(r'\*\*共鳴スコア\*\*:\s*(\d+)', section)
+                score = int(score_match.group(1)) if score_match else 0
+                
+                # Extract reason
+                reason_match = re.search(r'\*\*共鳴理由\*\*:\s*(.+)', section)
+                reason = reason_match.group(1).strip() if reason_match else "理由不明"
+                
+                opportunities.append({
+                    "title": title,
+                    "url": url,
+                    "amount": amount,
+                    "resonance_score": score,
+                    "reason": reason
+                })
+                
+                print(f"[DEBUG] Parsed opportunity: {title} (Score: {score})")
+            except Exception as e:
+                print(f"[ERROR] Failed to parse opportunity section: {e}")
+                continue
+        
+        return opportunities
 
-    def observe(self, user_id: str) -> str:
+    def observe(self, user_id: str) -> Tuple[str, List[Dict]]:
         """
         Executes the observation logic:
         1. Reads Soul Profile to understand what to look for.
@@ -112,6 +168,12 @@ Report on the top 3 opportunities found.
                     tools=[tool_config]
                 )
             )
-            return response.text
+            response_text = response.text
+            
+            # Parse opportunities from response
+            opportunities = self._parse_opportunities(response_text)
+            
+            return response_text, opportunities
         except Exception as e:
-            return f"Error during observation: {e}"
+            error_msg = f"Error during observation: {e}"
+            return error_msg, []

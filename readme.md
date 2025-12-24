@@ -56,11 +56,15 @@ NPO法人の代表者は、想いと行動力を持ちながらも、常に事�
 
 **「『とりあえず書いておいたよ』と言えるエージェント。」**
 
-- **Tech:** Gemini 3.0 Pro + Google Docs API
+- **Tech:** Gemini 3.0 Pro + Google Docs API / GCS
 - **Features:**
   - **自動ドラフト生成**: Soul Profileを基に助成金申請書のドラフトを作成
-  - **Google Docs統合**: 生成されたドラフトをGoogle Docsとして出力
+  - **3層保存ストレージ**:
+    1. Google Docs API: 認証情報があればGoogle Docとして直接作成
+    2. GCS: Production環境で `gs://{bucket}/drafts/{user_id}/` に永続化
+    3. ローカル: 開発環境で `drafts/` フォルダにフォールバック
   - **インテリジェントルーティング**: ユーザーの発言から「DRAFT」意図を自動検出
+  - **Strong Match自動生成**: Observer検出時（共鳴度70+）に自動でドラフトを作成
 
 ### 4. 🛡️ Production-Ready Infrastructure - ✅ Implemented
 
@@ -127,6 +131,9 @@ graph TD
   - Memory: `1Gi`
 - **Google Cloud Storage (GCS)**: プロファイルデータ永続化
   - Bucket: `gs://zenn-shadow-director-data`
+  - プロファイル: `profiles/{user_id}/soul_profile.json`
+  - ドラフト: `drafts/{user_id}/*.md`
+- **Google Docs API**: ドラフトをGoogle Docとして直接作成（有効時）
 - **Vertex AI**: Gemini API アクセス（`google-genai` SDK with Vertex AI backend）
 
 ### Development
@@ -270,8 +277,12 @@ gcloud config set project YOUR_PROJECT_ID
 gcloud services enable run.googleapis.com \
   cloudbuild.googleapis.com \
   aiplatform.googleapis.com \
-  storage.googleapis.com
+  storage.googleapis.com \
+  docs.googleapis.com \
+  drive.googleapis.com
 ```
+
+**Note:** デプロイスクリプト (`deploy_cloudrun.sh`) を使用すると、これらのAPIは自動的に有効化されます。
 
 ### 3. Create GCS Bucket
 ```bash

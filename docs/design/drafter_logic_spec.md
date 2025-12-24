@@ -14,8 +14,10 @@
 ## 3. システム構成
 *   **Model**: Google Vertex AI Gemini 2.5 Pro (or 3.0 Pro if available)
     *   高度な推論と長文生成能力が必要なため、Proモデルを採用。
-*   **Tools**: `GoogleDocsTool` (Mock: Local Markdown Output)
-    *   生成されたテキストをドキュメント形式で保存する。将来的には Google Docs API に直結。
+*   **Tools**: `GoogleDocsTool`
+    *   **Production**: Google Cloud Storage (`gs://bucket/drafts/{user_id}/`)に永続化
+    *   **Google Docs API**: 認証情報があればGoogle Docを作成
+    *   **Local Fallback**: ローカル`drafts/`ディレクトリにMarkdownファイルを保存
 *   **Input**:
     1.  User ID (to fetch Soul Profile)
     2.  Target Grant Information (募集要項、目的、金額など)

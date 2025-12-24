@@ -194,7 +194,68 @@ async def on_message(message):
                 except:
                     pass  # Ignore if already deleted
             
-            # File attachment logic for drafts
+            # Check for attachment marker (for draft viewing)
+            if "[ATTACHMENT_NEEDED:" in response:
+                import re
+                import io
+                
+                # Extract ALL marker info (for multiple drafts)
+                matches = re.findall(r'\[ATTACHMENT_NEEDED:([^:]+):([^\]]+)\]', response)
+                
+                if matches:
+                    logging.info(f"[ATTACHMENT] Found {len(matches)} attachment markers")
+                    
+                    # Remove all markers from response
+                    for match in re.finditer(r'\[ATTACHMENT_NEEDED:([^:]+):([^\]]+)\]', response):
+                        response = response.replace(match.group(0), '').strip()
+                    
+                    # Ensure response is within Discord's 2000 char limit
+                    MAX_LENGTH = 2000
+                    if len(response) > MAX_LENGTH:
+                        response = response[:MAX_LENGTH - 50] + "\n\n...(省略)..."
+                    
+                    # Send response text first
+                    await message.channel.send(response)
+                    
+                    # Process each attachment
+                    for user_id, filename_hint in matches:
+                        try:
+                            logging.info(f"[ATTACHMENT] Processing: User={user_id}, Hint={filename_hint}")
+                            
+                            draft_content = None
+                            filename = filename_hint
+                            
+                            if filename_hint == "latest":
+                                _, draft_content = orchestrator.drafter.get_latest_draft(user_id)
+                                # Get actual filename
+                                drafts = orchestrator.drafter.docs_tool.list_drafts(user_id)
+                                if drafts:
+                                    filename = sorted(drafts)[-1]
+                                else:
+                                    filename = "draft.md"
+                                logging.info(f"[ATTACHMENT] Latest draft: {filename}")
+                            else:
+                                draft_content = orchestrator.drafter.docs_tool.get_draft(user_id, filename)
+                                logging.info(f"[ATTACHMENT] Specific draft: {filename}")
+                            
+                            if draft_content:
+                                logging.info(f"[ATTACHMENT] Content length: {len(draft_content)} chars")
+                                
+                                # Create file from string content
+                                file_bytes = io.BytesIO(draft_content.encode('utf-8'))
+                                discord_file = discord.File(file_bytes, filename=filename)
+                                await message.channel.send(file=discord_file)
+                                logging.info(f"[ATTACHMENT] File sent: {filename}")
+                            else:
+                                logging.error(f"[ATTACHMENT] No content found for {filename}")
+                                await message.channel.send(f"⚠️ `{filename}` の内容が取得できませんでした。")
+                        except Exception as e:
+                            logging.error(f"[ATTACHMENT] Error processing {filename_hint}: {e}", exc_info=True)
+                            await message.channel.send(f"⚠️ ファイル添付エラー ({filename_hint}): {e}")
+                    
+                    return
+            
+            # File attachment logic for drafts (legacy)
             if "Draft created successfully at:" in response:
                  lines = response.split('\n')
                  file_path = ""
