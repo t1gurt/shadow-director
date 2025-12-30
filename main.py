@@ -194,6 +194,42 @@ async def on_message(message):
                 except:
                     pass  # Ignore if already deleted
             
+            # Check for image marker (for slide images)
+            if "[IMAGE_NEEDED:" in response:
+                import re
+                import io
+                
+                # Extract ALL image markers
+                image_matches = re.findall(r'\[IMAGE_NEEDED:([^:]+):([^\]]+)\]', response)
+                
+                if image_matches:
+                    logging.info(f"[IMAGE] Found {len(image_matches)} image markers")
+                    
+                    # Remove all image markers from response
+                    for match in re.finditer(r'\[IMAGE_NEEDED:([^:]+):([^\]]+)\]', response):
+                        response = response.replace(match.group(0), '').strip()
+                    
+                    # Process each image
+                    for user_id, filename in image_matches:
+                        try:
+                            logging.info(f"[IMAGE] Processing: User={user_id}, File={filename}")
+                            
+                            # Get image from SlideGenerator
+                            image_bytes = orchestrator.slide_generator.get_slide(user_id, filename)
+                            
+                            if image_bytes:
+                                logging.info(f"[IMAGE] Image size: {len(image_bytes)} bytes")
+                                
+                                # Create file from image bytes
+                                file_bytes = io.BytesIO(image_bytes)
+                                discord_file = discord.File(file_bytes, filename=filename)
+                                await message.channel.send(file=discord_file)
+                                logging.info(f"[IMAGE] Image sent: {filename}")
+                            else:
+                                logging.error(f"[IMAGE] Image not found: {filename}")
+                        except Exception as e:
+                            logging.error(f"[IMAGE] Error processing {filename}: {e}", exc_info=True)
+            
             # Check for attachment marker (for draft viewing)
             if "[ATTACHMENT_NEEDED:" in response:
                 import re

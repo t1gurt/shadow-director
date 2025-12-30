@@ -272,13 +272,22 @@ class InterviewerAgent:
         if not insight_prompt:
             return
 
+        # Get context template from config or use default
+        context_template = self.config.get("system_prompts", {}).get("insight_extraction_context", "")
+        if context_template:
+            context = context_template.format(user_input=user_input, agent_response=agent_response)
+        else:
+            context = f"""
+分析対象の会話:
+ユーザー: {user_input}
+エージェント: {agent_response}
+"""
+        
         # Simple context for extraction: just the last turn
         extraction_input = f"""
 {insight_prompt}
 
-Conversation to Analyze:
-User: {user_input}
-Agent: {agent_response}
+{context}
 """
         try:
             # parsing can be fragile. We ask for JSON.

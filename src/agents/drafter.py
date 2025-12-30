@@ -42,9 +42,92 @@ class DrafterAgent:
             print(f"Error loading config: {e}")
             return {}
 
+    def _research_grant_format(self, grant_name: str) -> str:
+        """
+        Researches the grant application format using Google Search Grounding.
+        
+        Args:
+            grant_name: Name of the grant to research
+            
+        Returns:
+            Application format information (questions, requirements, etc.)
+        """
+        import logging
+        from google.genai.types import GenerateContentConfig, Tool, GoogleSearch
+        
+        logging.info(f"[DRAFTER] Researching format for: {grant_name}")
+        
+        research_prompt = f"""
+以下の助成金の申請書フォーマット（質問項目・記入欄）を調査してください。
+
+助成金名: {grant_name}
+
+調査すべき内容:
+1. 申請書の質問項目（例：団体概要、事業計画、予算など）
+2. 各項目の文字数制限や記入例
+3. 審査のポイント・評価基準
+4. 必要な添付書類
+
+出力形式:
+## 申請書フォーマット
+
+### 質問項目
+1. [項目名] （文字数制限があれば記載）
+2. [項目名] （文字数制限があれば記載）
+...
+
+### 審査ポイント
+- [ポイント1]
+- [ポイント2]
+
+### 必要書類
+- [書類1]
+- [書類2]
+
+※見つからない場合は一般的な助成金申請書の形式を想定してください。
+"""
+        
+        try:
+            # Use Google Search Grounding for format research
+            google_search_tool = Tool(google_search=GoogleSearch())
+            
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=research_prompt,
+                config=GenerateContentConfig(
+                    tools=[google_search_tool],
+                    temperature=0.3
+                )
+            )
+            
+            format_info = response.text
+            logging.info(f"[DRAFTER] Format research completed, length: {len(format_info)} chars")
+            return format_info
+            
+        except Exception as e:
+            logging.error(f"[DRAFTER] Format research failed: {e}")
+            # Return generic format as fallback
+            return """
+## 申請書フォーマット（一般的な形式）
+
+### 質問項目
+1. 団体概要（400字程度）
+2. 事業の目的と背景（600字程度）
+3. 具体的な活動計画
+4. 期待される成果・効果
+5. 予算計画
+6. 今後の展望
+
+### 審査ポイント
+- 社会的意義と必要性
+- 実現可能性
+- 団体の実績と信頼性
+- 費用対効果
+"""
+
     def create_draft(self, user_id: str, grant_info: str) -> tuple[str, str, str]:
         """
-        Generates a grant application draft.
+        Generates a grant application draft based on researched format.
         
         Returns:
             tuple: (message, draft_content, filename)
@@ -56,19 +139,67 @@ class DrafterAgent:
         profile = pm.get_profile_context()
         
         logging.info(f"[DRAFTER] Profile loaded, length: {len(profile)} chars")
-
+        
+        # Extract grant name from grant_info for format research
+        grant_name = grant_info.strip()
+        # Try to extract just the grant name if it contains other info
+        if "助成" in grant_name:
+            # Find the grant name pattern
+            import re
+            match = re.search(r'[^\s]+助成[^\s]*', grant_name)
+            if match:
+                grant_name = match.group(0)
+        
+        # Step 1: Research the application format
+        logging.info(f"[DRAFTER] Step 1: Researching format for '{grant_name}'")
+        format_info = self._research_grant_format(grant_name)
+        
+        # Step 2: Generate draft based on format
+        logging.info(f"[DRAFTER] Step 2: Generating format-aware draft")
+        
         full_prompt = f"""
 {self.system_prompt}
 
-Soul Profile（魂のプロファイル）:
+# Soul Profile（魂のプロファイル）
 {profile}
 
-対象助成金情報:
+# 対象助成金
 {grant_info}
 
-タスク:
-この助成金に対する完全な申請書ドラフトを日本語で作成してください。
-必ず📋考慮点、🌟アピールポイント、⚠️懸念点のセクションを含めてください。
+# 申請書フォーマット情報
+{format_info}
+
+# タスク
+上記の申請書フォーマットに従って、各質問項目に対する回答を作成してください。
+
+**重要な指示:**
+1. フォーマット情報の質問項目ごとに見出しを付けて回答を作成
+2. 文字数制限がある場合はそれに収まるように調整
+3. Soul Profileの情報を最大限活用
+4. 各回答の後に簡単な📝記入のポイントを追記
+
+**出力形式:**
+# [助成金名] 申請書ドラフト
+
+## 1. [質問項目1]
+[回答内容]
+📝 ポイント: [この項目で強調すべき点]
+
+## 2. [質問項目2]
+[回答内容]
+📝 ポイント: [この項目で強調すべき点]
+
+...
+
+---
+## 📋 全体の考慮点
+[申請全体で気をつけるべき点]
+
+## 🌟 アピールポイント
+[特に強調すべき団体の強み]
+
+## ⚠️ 懸念点・改善提案
+[申請で弱くなりそうな点と対策]
 """
         try:
             logging.info(f"[DRAFTER] Calling Gemini model: {self.model_name}")
@@ -114,6 +245,7 @@ Soul Profile（魂のプロファイル）:
             error_msg = f"ドラフト作成エラー: {e}"
             return (error_msg, "", "")
 
+
     def list_drafts(self, user_id: str) -> str:
         """
         Lists all drafts for a user.
@@ -140,6 +272,21 @@ Soul Profile（魂のプロファイル）:
             
         except Exception as e:
             return f"ドラフト一覧取得エラー: {e}"
+
+    def clear_drafts(self, user_id: str) -> str:
+        """
+        Clears all drafts for a user.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Success message
+        """
+        try:
+            return self.docs_tool.clear_drafts(user_id)
+        except Exception as e:
+            return f"ドラフトクリアエラー: {e}"
 
     def get_latest_draft(self, user_id: str) -> tuple[str, Optional[str]]:
         """

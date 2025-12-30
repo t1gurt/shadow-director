@@ -220,7 +220,7 @@ shadow-director/
 
 以下の機能は将来の拡張として検討中です：
 
-- [ ] **Vertex AI Memory Bank**: 現在はGCSを使用していますが、将来的にMemory Bank APIへの移行を検討
+- [x] **Vertex AI Memory Bank**: `USE_MEMORY_BANK=true` 環境変数で有効化可能（Preview）
 - [ ] **Context Caching**: 長文プロファイルの効率的な再利用
 - [ ] **Multi-Tenant Support**: 複数のNPO団体を同時サポート（現在はチャネルベースの分離のみ）
 - [ ] **Advanced Analytics**: プロファイルデータの可視化・分析ダッシュボード

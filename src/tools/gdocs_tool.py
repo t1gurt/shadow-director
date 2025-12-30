@@ -85,9 +85,16 @@ class GoogleDocsTool:
 
     def _create_gcs_doc(self, title: str, content: str, user_id: str) -> str:
         """Creates a draft in Google Cloud Storage."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_title = "".join([c for c in title if c.isalnum() or c in (' ', '-', '_')]).strip().replace(' ', '_')
-        filename = f"{safe_title}_{timestamp}.md"
+        import re
+        # Format: YYYYMMDD_助成金名.md（わかりやすい形式）
+        date_str = datetime.now().strftime("%Y%m%d")
+        # Allow alphanumeric, Japanese characters, spaces, hyphens, underscores
+        safe_title = re.sub(r'[^\w\s\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF-]', '', title).strip().replace(' ', '_')
+        # Limit title length to avoid very long filenames
+        if len(safe_title) > 30:
+            safe_title = safe_title[:30]
+        filename = f"{date_str}_{safe_title}.md"
+
         blob_path = f"drafts/{user_id}/{filename}"
         
         try:
@@ -207,3 +214,42 @@ class GoogleDocsTool:
                     drafts.append(f)
         
         return drafts
+
+    def clear_drafts(self, user_id: str) -> str:
+        """
+        Clears all drafts for a user.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Success message with count of deleted drafts
+        """
+        deleted_count = 0
+        
+        # Clear GCS drafts
+        if self.gcs_bucket:
+            try:
+                prefix = f"drafts/{user_id}/"
+                blobs = list(self.gcs_bucket.list_blobs(prefix=prefix))
+                for blob in blobs:
+                    blob.delete()
+                    deleted_count += 1
+                print(f"Deleted {deleted_count} drafts from GCS")
+            except Exception as e:
+                print(f"Error clearing GCS drafts: {e}")
+        
+        # Clear local drafts (for development)
+        if os.path.exists(self.output_dir):
+            try:
+                local_files = [f for f in os.listdir(self.output_dir) if f.endswith('.md')]
+                for f in local_files:
+                    os.remove(os.path.join(self.output_dir, f))
+                    deleted_count += 1
+            except Exception as e:
+                print(f"Error clearing local drafts: {e}")
+        
+        if deleted_count > 0:
+            return f"✅ {deleted_count}件のドラフトを削除しました。"
+        else:
+            return "削除するドラフトはありませんでした。"
