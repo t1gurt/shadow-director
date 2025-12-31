@@ -226,6 +226,46 @@ class ProfileManager:
         self._profile["conversation_history"] = []
         self.save_profile()
 
+    # ==================== PR/SNS情報管理 ====================
+
+    def update_sns_info(self, platform: str, url: str) -> None:
+        """
+        Updates SNS monitoring information for the profile.
+        
+        Args:
+            platform: sns platform (e.g., 'facebook', 'instagram', 'twitter', 'website')
+            url: The URL to watch
+        """
+        if "sns_watch_info" not in self._profile:
+            self._profile["sns_watch_info"] = {}
+        
+        # Normalize key
+        platform_key = platform.lower().strip()
+        self._profile["sns_watch_info"][platform_key] = url
+        self.save_profile()
+        logging.info(f"[PROFILE] Updated SNS info for {platform_key}: {url}")
+
+    def get_sns_info(self) -> Dict[str, str]:
+        """
+        Returns all stored SNS watch information.
+        """
+        return self._profile.get("sns_watch_info", {})
+
+    def add_monthly_summary(self, summary_text: str) -> None:
+        """
+        Saves a generated monthly summary to the profile history.
+        """
+        from datetime import datetime
+        if "monthly_summaries" not in self._profile:
+            self._profile["monthly_summaries"] = []
+            
+        record = {
+            "date": datetime.now().isoformat(),
+            "summary": summary_text
+        }
+        self._profile["monthly_summaries"].append(record)
+        self.save_profile()
+
     # ==================== 助成金履歴管理 ====================
     
     def get_shown_grants(self) -> List[Dict[str, Any]]:

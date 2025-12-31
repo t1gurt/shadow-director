@@ -3,6 +3,7 @@ import discord
 from discord.ext import tasks
 from dotenv import load_dotenv
 from src.agents.orchestrator import Orchestrator
+from src.version import __version__, __update_date__
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
@@ -10,6 +11,12 @@ import asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+
+# Log version information at startup
+logging.info("=" * 60)
+logging.info(f"Shadow Director Bot - Version {__version__}")
+logging.info(f"Last Updated: {__update_date__}")
+logging.info("=" * 60)
 
 # Load environment variables
 load_dotenv()
@@ -45,48 +52,71 @@ client = discord.Client(intents=intents)
 # Orchestrator will be initialized lazily or in main
 orchestrator = None
 
-# Global task variable to prevent duplicate scheduled_observation tasks
+import datetime
+
+# ... (imports) ...
+
+# Global task variable to prevent duplicate tasks
 scheduled_observation_task = None
+scheduled_monthly_task = None
 
 @tasks.loop(hours=168)
 async def scheduled_observation():
     """
     Runs weekly (168 hours) to check for new funding opportunities.
     """
+    # ... (existing code) ...
+
+# Run everyday at 9:00 AM (assuming JST or system time)
+@tasks.loop(time=datetime.time(hour=9, minute=0))
+async def scheduled_monthly_summary():
+    """
+    Runs daily at 9:00 AM, but only executes logic on the 1st of the month.
+    """
     global orchestrator
     if not orchestrator:
-         logging.warning("Orchestrator not ready yet. Skipping observation.")
+         logging.warning("Orchestrator not ready yet. Skipping monthly summary.")
          return
 
-    logging.info("Running scheduled observation task...")
+    now = datetime.datetime.now()
+    # Check if it's the 1st day of the month
+    if now.day != 1:
+        return
+
+    logging.info("It's the 1st of the month! Running monthly summary task...")
     try:
-        notifications = orchestrator.run_periodic_checks()
+        notifications = orchestrator.run_monthly_tasks()
         
         for user_id, message in notifications:
             try:
                 user = await client.fetch_user(int(user_id))
                 if user:
-                    await user.send(f"**[Autonomous Funding Watch]**\n新しい助成金情報が見つかりました。\n\n{message}")
+                    await user.send(message)
             except Exception as e:
-                logging.error(f"Failed to send notification to user {user_id}: {e}")
+                logging.error(f"Failed to send monthly summary to user {user_id}: {e}")
     except Exception as e:
-        logging.error(f"Error in scheduled_observation: {e}")
+        logging.error(f"Error in scheduled_monthly_summary: {e}")
 
 @client.event
 async def on_ready():
-    global scheduled_observation_task
+    global scheduled_observation_task, scheduled_monthly_task
     
     logging.info(f'We have logged in as {client.user}')
+    logging.info(f'Bot Version: {__version__} (Updated: {__update_date__})')
     
-    # Prevent duplicate task execution on reconnection
-    # Only start if task is None or already done
+    # Start Weekly Observation Task
     if scheduled_observation_task is None or scheduled_observation_task.done():
         logging.info("Starting scheduled_observation task...")
         if not scheduled_observation.is_running():
             scheduled_observation.start()
-        scheduled_observation_task = asyncio.create_task(asyncio.sleep(0))  # Placeholder task
-    else:
-        logging.info("scheduled_observation task is already running, skipping duplicate start")
+        scheduled_observation_task = asyncio.create_task(asyncio.sleep(0))
+    
+    # Start Monthly Summary Task
+    if scheduled_monthly_task is None or scheduled_monthly_task.done():
+        logging.info("Starting scheduled_monthly_summary task...")
+        if not scheduled_monthly_summary.is_running():
+            scheduled_monthly_summary.start()
+        scheduled_monthly_task = asyncio.create_task(asyncio.sleep(0))
 
 @client.event
 async def on_guild_channel_create(channel):
@@ -152,47 +182,20 @@ async def on_message(message):
             return
         
         try:
-            # Check if message has attachments or URLs first (before typing indicator)
-            has_attachments = len(message.attachments) > 0
-            has_urls = 'http://' in user_input or 'https://' in user_input
-            
-            # Send progress message for file/URL processing
-            progress_msg = None
-            if has_attachments or has_urls:
-                status_parts = []
-                if has_attachments:
-                    status_parts.append(f"📄 {len(message.attachments)}件のファイル")
-                if has_urls:
-                    import re
-                    url_count = len(re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', user_input))
-                    status_parts.append(f"🔗 {url_count}件のURL")
-                
-                progress_text = " と ".join(status_parts) + " を分析中..."
-                progress_msg = await message.channel.send(f"⏳ {progress_text}")
-                logging.info(f"Processing files/URLs for channel {message.channel.id}: {status_parts}")
-            
             # Show typing indicator
             async with message.channel.typing():
                 if orchestrator:
-                    if has_attachments or has_urls:
-                        # Use file/URL processing method
-                        response = await orchestrator.interviewer.process_with_files_and_urls(
-                            user_input, 
-                            str(message.channel.id),
-                            attachments=message.attachments if has_attachments else None
-                        )
-                    else:
-                        # Normal text-only processing
-                        response = orchestrator.route_message(user_input, str(message.channel.id))
+                    # Always route through orchestrator, which will handle attachments appropriately
+                    # Run potentially blocking synchronous code in a separate thread to avoid blocking the event loop
+                    import asyncio
+                    response = await asyncio.to_thread(
+                        orchestrator.route_message,
+                        user_input, 
+                        str(message.channel.id),
+                        attachments=message.attachments if message.attachments else None
+                    )
                 else:
                     response = "System initializing... Please wait."
-            
-            # Delete progress message after processing
-            if progress_msg:
-                try:
-                    await progress_msg.delete()
-                except:
-                    pass  # Ignore if already deleted
             
             # Check for image marker (for slide images)
             if "[IMAGE_NEEDED:" in response:
@@ -229,6 +232,68 @@ async def on_message(message):
                                 logging.error(f"[IMAGE] Image not found: {filename}")
                         except Exception as e:
                             logging.error(f"[IMAGE] Error processing {filename}: {e}", exc_info=True)
+            
+            # Check for format file marker (for application format files)
+            if "[FORMAT_FILE_NEEDED:" in response:
+                import re
+                import io
+                import os
+                
+                # Extract ALL format file markers
+                format_file_matches = re.findall(r'\[FORMAT_FILE_NEEDED:([^:]+):([^\]]+)\]', response)
+                
+                if format_file_matches:
+                    logging.info(f"[FORMAT_FILE] Found {len(format_file_matches)} format file markers")
+                    
+                    # Remove all markers from response
+                    for match in re.finditer(r'\[FORMAT_FILE_NEEDED:([^:]+):([^\]]+)\]', response):
+                        response = response.replace(match.group(0), '').strip()
+                    
+                    # Process each format file
+                    for user_id, file_path in format_file_matches:
+                        try:
+                            logging.info(f"[FORMAT_FILE] Processing: User={user_id}, Path={file_path}")
+                            
+                            # Check if file exists and send
+                            if os.path.exists(file_path):
+                                file_size = os.path.getsize(file_path)
+                                logging.info(f"[FORMAT_FILE] File size: {file_size} bytes")
+                                
+                                # Check Discord limit (25MB)
+                                if file_size > 25 * 1024 * 1024:
+                                    await message.channel.send(f"⚠️ フォーマットファイルが大きすぎます ({file_size / 1024 / 1024:.1f}MB)")
+                                    # Delete oversized file
+                                    try:
+                                        os.remove(file_path)
+                                        logging.info(f"[FORMAT_FILE] Deleted oversized file: {file_path}")
+                                    except Exception as del_err:
+                                        logging.error(f"[FORMAT_FILE] Failed to delete oversized file: {del_err}")
+                                else:
+                                    filename = os.path.basename(file_path)
+                                    discord_file = discord.File(file_path, filename=filename)
+                                    await message.channel.send(file=discord_file)
+                                    logging.info(f"[FORMAT_FILE] File sent: {filename}")
+                                    
+                                    # Delete file after successful send
+                                    try:
+                                        os.remove(file_path)
+                                        logging.info(f"[FORMAT_FILE] Deleted file after send: {file_path}")
+                                    except Exception as del_err:
+                                        logging.error(f"[FORMAT_FILE] Failed to delete file after send: {del_err}")
+                                    
+                            else:
+                                logging.error(f"[FORMAT_FILE] File not found: {file_path}")
+                                await message.channel.send(f"⚠️ フォーマットファイルが見つかりませんでした")
+                        except Exception as e:
+                            logging.error(f"[FORMAT_FILE] Error processing {file_path}: {e}", exc_info=True)
+                            await message.channel.send(f"⚠️ フォーマットファイル送信エラー: {e}")
+                            # Try to clean up file even on error
+                            try:
+                                if os.path.exists(file_path):
+                                    os.remove(file_path)
+                                    logging.info(f"[FORMAT_FILE] Cleaned up file after error: {file_path}")
+                            except Exception as del_err:
+                                logging.error(f"[FORMAT_FILE] Failed to clean up file after error: {del_err}")
             
             # Check for attachment marker (for draft viewing)
             if "[ATTACHMENT_NEEDED:" in response:

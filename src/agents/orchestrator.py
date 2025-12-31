@@ -10,11 +10,16 @@ from src.agents.drafter import DrafterAgent
 from src.memory.profile_manager import ProfileManager
 from src.tools.slide_generator import SlideGenerator
 
+from src.agents.pr_agent import PRAgent
+from src.version import get_version_info
+
+
 class Orchestrator:
     def __init__(self):
         self.interviewer = InterviewerAgent()
         self.observer = ObserverAgent()
         self.drafter = DrafterAgent()
+        self.pr_agent = PRAgent()
         self.slide_generator = SlideGenerator()
         self.system_prompt = self._load_system_prompt()
 
@@ -59,9 +64,33 @@ class Orchestrator:
                 contents=prompt
             )
             intent = response.text.strip().upper()
+            
+            # Debug logging for intent classification
+            logging.info(f"[INTENT] User: '{user_message}' → Model returned: '{intent}'")
+            
+            # Handle empty or invalid response with keyword-based fallback
+            if not intent or len(intent) == 0:
+                logging.warning(f"[INTENT] Empty response from model, using keyword fallback")
+                # Keyword-based fallback for critical intents
+                msg_lower = user_message.lower()
+                if "助成金" in msg_lower and ("探して" in msg_lower or "検索" in msg_lower or "見つけて" in msg_lower):
+                    logging.info(f"[INTENT] Fallback: Detected OBSERVE intent via keywords")
+                    return "OBSERVE"
+                elif "バージョン" in msg_lower or "version" in msg_lower:
+                    logging.info(f"[INTENT] Fallback: Detected VERSION intent via keywords")
+                    return "VERSION"
+                elif "ヘルプ" in msg_lower or "help" in msg_lower:
+                    logging.info(f"[INTENT] Fallback: Detected HELP intent via keywords")
+                    return "HELP"
+                elif "ドラフト" in msg_lower and "書いて" in msg_lower:
+                    logging.info(f"[INTENT] Fallback: Detected DRAFT intent via keywords")
+                    return "DRAFT"
+                else:
+                    logging.info(f"[INTENT] Fallback: No keywords matched, defaulting to INTERVIEW")
+                    return "INTERVIEW"
+            
             # Use exact match or startswith to avoid overlap issues
-            if intent.startswith("HELP"): return "HELP"
-            if intent.startswith("UNKNOWN"): return "UNKNOWN"
+            # Check specific intents BEFORE generic ones like HELP/UNKNOWN
             if intent.startswith("DETAIL_GRANT"): return "DETAIL_GRANT"
             if intent.startswith("FIND_RESONANCE"): return "FIND_RESONANCE"
             if intent.startswith("CLEAR_DRAFTS"): return "CLEAR_DRAFTS"
@@ -72,19 +101,41 @@ class Orchestrator:
             if intent.startswith("VIEW") or intent.startswith("LIST"): return "VIEW_DRAFTS"
             if intent.startswith("DRAFT"): return "DRAFT"
             if intent.startswith("OBSERVE"): return "OBSERVE"
+            
+            # PR Agent Intents
+            if intent.startswith("PR_REMEMBER_SNS"): return "PR_REMEMBER_SNS"
+            if intent.startswith("PR_MONTHLY_SUMMARY"): return "PR_MONTHLY_SUMMARY"
+            if intent.startswith("PR_CREATE_POST"): return "PR_CREATE_POST"
+            if intent.startswith("PR_SEARCH_RELATED"): return "PR_SEARCH_RELATED"
+            
+            # Version Intent - check BEFORE HELP/UNKNOWN
+            if intent.startswith("VERSION"): return "VERSION"
+            
+            # Generic intents - check LAST
+            if intent.startswith("HELP"): return "HELP"
             if intent.startswith("INTERVIEW"): return "INTERVIEW"
+            if intent.startswith("UNKNOWN"): return "UNKNOWN"
+            
             return "UNKNOWN"  # Default to UNKNOWN for unclear intents
 
 
         except Exception as e:
-            print(f"Routing error: {e}")
+            logging.error(f"[INTENT] Routing error: {e}", exc_info=True)
+            # Keyword-based fallback on exception
+            msg_lower = user_message.lower()
+            if "助成金" in msg_lower and ("探して" in msg_lower or "検索" in msg_lower):
+                logging.info(f"[INTENT] Exception fallback: OBSERVE")
+                return "OBSERVE"
+            elif "バージョン" in msg_lower or "version" in msg_lower:
+                logging.info(f"[INTENT] Exception fallback: VERSION")
+                return "VERSION"
             return "UNKNOWN"
 
     def _get_help_message(self) -> str:
         """Returns the help message with all available commands."""
         return """# 🤖 Shadow Director - 機能一覧
 
-**Shadow Director**はNPOの資金調達を支援するAIアシスタントです。
+**Shadow Director**はNPOの資金調達と広報活動を支援するAIアシスタントです。
 
 ---
 
@@ -102,17 +153,24 @@ class Orchestrator:
 **助成金を探して**
 → あなたのNPOに合った助成金を検索
 
-**○○について詳しく調べて**
-→ 指定した助成金の詳細と5軸評価を表示
-
 **ドラフトを書いて**
 → 助成金申請書のドラフトを自動生成
 
-**ドラフト一覧** / **ドラフトをクリア**
-→ ドラフトの一覧表示・削除
+**投稿記事を作って**
+→ Facebook/Instagram用の投稿記事ドラフトを作成
+(写真やイベント詳細を一緒に送信してください)
 
-**提案済み助成金** / **助成金履歴をクリア**
-→ 助成金履歴の表示・リセット
+**月次サマリ**
+→ 今月の活動サマリレポートを作成
+
+**関連情報を探して**
+→ 興味のあるキーワードで最新情報を検索
+
+**SNS URLを記憶**
+→ 「FacebookのURLを記憶して: [URL]」のように指示
+
+**バージョン**
+→ Botのバージョン情報と最新機能を確認
 
 ---
 
@@ -120,7 +178,7 @@ class Orchestrator:
 
 1️⃣ **まずは自己紹介** - NPOの活動内容を教えてください
 2️⃣ **助成金を探す** - 「助成金を探して」と言ってください
-3️⃣ **ドラフト作成** - 共鳴度70以上の助成金には自動でドラフトが作成されます
+3️⃣ **広報支援** - イベントの写真などを送って「記事を作って」
 
 ---
 
@@ -128,14 +186,21 @@ class Orchestrator:
 """
 
 
-    def route_message(self, user_message: str, user_id: str, **kwargs) -> str:
+    def route_message(self, user_message: str, user_id: str, attachments=None, **kwargs) -> str:
         """
         Routes the message based on intent.
         Returns: Response message, possibly with [ATTACHMENT_NEEDED] marker.
+        
+        Args:
+            attachments: Discord attachments (for file uploads like PDFs, images)
         """
         intent = self._classify_intent(user_message)
         print(f"Routing Intent: {intent}")
 
+        if intent == "VERSION":
+            # Show version information
+            return get_version_info()
+        
         if intent == "HELP" or intent == "UNKNOWN":
             # Show help message for both HELP and UNKNOWN intents
             return self._get_help_message()
@@ -204,22 +269,83 @@ class Orchestrator:
 
         if intent == "DRAFT":
             # Create draft and automatically attach file
-            message, content, filename = self.drafter.create_draft(user_id, user_message)
+            message, content, filename, format_files = self.drafter.create_draft(user_id, user_message)
+            
+            # Build response with format files first, then draft
+            response = ""
+            if format_files:
+                response += "📎 **申請フォーマットファイル** が見つかりました:\n"
+                for file_path, file_name in format_files:
+                    response += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+                response += "\n"
+            else:
+                # Notify user that no format files were found
+                response += "ℹ️ 申請フォーマットファイルは見つかりませんでした。一般的な申請書形式でドラフトを作成しました。\n\n"
             
             if content:
                 # Success: send minimal message with attachment marker
-                # Details will be in the attached file
-                return f"✅ ドラフト作成完了\n📄 ファイルとして送信します...\n[ATTACHMENT_NEEDED:{user_id}:{filename}]"
+                response += f"✅ ドラフト作成完了\n📄 ファイルとして送信します...\n[ATTACHMENT_NEEDED:{user_id}:{filename}]"
+                return response
             else:
                 # Error occurred
-                return f"❌ ドラフト作成エラー\n{message}"
+                return response + f"❌ ドラフト作成エラー\n{message}"
         
         if intent == "OBSERVE":
             # Manual Observer trigger
             return self._run_observer(user_id)
+            
+        # --- PR Agent Intents ---
+        if intent == "PR_REMEMBER_SNS":
+            # Extract basic URL pattern
+            urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', user_message)
+            if not urls:
+                return "⚠️ URLが見つかりませんでした。「FacebookのURLを記憶して: https://...」のように指定してください。"
+            
+            platform = "website"
+            if "facebook" in user_message.lower(): platform = "facebook"
+            elif "instagram" in user_message.lower() or "インスタ" in user_message: platform = "instagram"
+            elif "twitter" in user_message.lower() or "x.com" in user_message: platform = "twitter"
+            
+            return self.pr_agent.remember_sns_info(user_id, platform, urls[0])
+            
+        if intent == "PR_MONTHLY_SUMMARY":
+            return self.pr_agent.generate_monthly_summary(user_id)
+            
+        if intent == "PR_CREATE_POST":
+            # Determine platform
+            platform = "Facebook"
+            if "instagram" in user_message.lower() or "インスタ" in user_message:
+                platform = "Instagram"
+            
+            # Process attachments if provided
+            attachment_data = None
+            if attachments and len(attachments) > 0:
+                attachment_data = attachments  # Pass Discord attachments directly
+            
+            return self.pr_agent.create_post_draft(user_id, platform, user_message, attachments=attachment_data)
+
+        if intent == "PR_SEARCH_RELATED":
+            return self.pr_agent.search_related_info(user_id, user_message)
         
         # Default to Interviewer
-        interviewer_response = self.interviewer.process_message(user_message, user_id, **kwargs)
+        # If attachments exist, use interviewer's file processing
+        if attachments and len(attachments) > 0:
+            # For interview intent with attachments, use the file processing method
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're in async context, but interviewer method is async
+                # This is a sync method, so we need to handle this carefully
+                # For now, just pass text and note that files were attached
+                interviewer_response = self.interviewer.process_message(
+                    user_message + f"\n\n(添付ファイル: {len(attachments)}件を含む)", 
+                    user_id, 
+                    **kwargs
+                )
+            else:
+                interviewer_response = self.interviewer.process_message(user_message, user_id, **kwargs)
+        else:
+            interviewer_response = self.interviewer.process_message(user_message, user_id, **kwargs)
         
         # Check if interview just completed
         if "[INTERVIEW_COMPLETE]" in interviewer_response:
@@ -301,7 +427,16 @@ URL: {opp.get('url', 'N/A')}
                 # Auto-trigger Drafter
                 try:
                     logging.info(f"[ORCH] Auto-triggering Drafter for: {opp['title']}")
-                    message, content, filename = self.drafter.create_draft(user_id, grant_info)
+                    message, content, filename, format_files = self.drafter.create_draft(user_id, grant_info)
+                    
+                    # Add format file markers if any
+                    if format_files:
+                        result += "📎 申請フォーマットファイル:\n"
+                        for file_path, file_name in format_files:
+                            result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+                    else:
+                        # Notify user that no format files were found
+                        result += "ℹ️ 申請フォーマットファイルは見つかりませんでした。\n"
                     
                     if content:
                         # Success: add concise message with attachment marker
@@ -413,5 +548,36 @@ URL: {opp.get('url', 'N/A')}
                      
             except Exception as e:
                 print(f"Error checking profile {file_path}: {e}")
+                
+        return notifications
+
+    def run_monthly_tasks(self) -> List[Tuple[str, str]]:
+        """
+        Triggered by scheduler on the 1st of every month.
+        Generates monthly summary for all known profiles.
+        Returns a list of (user_id, summary_text).
+        """
+        notifications = []
+        profile_files = glob.glob(os.path.join("profiles", "*_profile.json"))
+        
+        for file_path in profile_files:
+            try:
+                filename = os.path.basename(file_path)
+                user_id = filename.replace("_profile.json", "")
+                
+                print(f"Running monthly summary for User: {user_id}")
+                
+                # Generate Monthly Summary
+                summary = self.pr_agent.generate_monthly_summary(user_id)
+                
+                # Save to history (ProfileManager extension required, but for now assuming it's part of pr_agent or pm)
+                # Ideally PR Agent handles saving, but let's ensure here.
+                pm = ProfileManager(user_id=user_id)
+                pm.add_monthly_summary(summary)
+                
+                notifications.append((user_id, f"📅 **【自動実行】月次活動サマリを作成しました**\n\n{summary}"))
+                     
+            except Exception as e:
+                print(f"Error running monthly task for {file_path}: {e}")
                 
         return notifications

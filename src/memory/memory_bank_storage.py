@@ -68,14 +68,24 @@ class MemoryBankStorage:
         """
         # List existing Agent Engines to find one for Shadow Director
         try:
-            request = reasoning_engine_types.ListReasoningEnginesRequest(
-                parent=self.parent
-            )
-            engines = list(self.client.list_reasoning_engines(request=request))
+            # Try using the direct method without request object (newer API)
+            try:
+                engines = list(self.client.list_reasoning_engines(parent=self.parent))
+            except TypeError:
+                # Fallback: try with request object (older API)
+                try:
+                    request = reasoning_engine_types.ListReasoningEnginesRequest(
+                        parent=self.parent
+                    )
+                    engines = list(self.client.list_reasoning_engines(request=request))
+                except AttributeError:
+                    # ListReasoningEnginesRequest not available in this SDK version
+                    logging.warning("[MEMORY_BANK] ListReasoningEnginesRequest not available, skipping list")
+                    engines = []
             
             # Look for existing Shadow Director engine
             for engine in engines:
-                if "shadow-director" in engine.display_name.lower():
+                if hasattr(engine, 'display_name') and "shadow-director" in engine.display_name.lower():
                     logging.info(f"[MEMORY_BANK] Found existing Agent Engine: {engine.name}")
                     return engine.name
             
@@ -94,21 +104,36 @@ class MemoryBankStorage:
             Agent Engine resource name
         """
         try:
+            # Check if required types are available
+            if not hasattr(reasoning_engine_types, 'ReasoningEngine'):
+                raise AttributeError("ReasoningEngine type not available in SDK")
+            
+            if not hasattr(reasoning_engine_types, 'ReasoningEngineSpec'):
+                raise AttributeError("ReasoningEngineSpec type not available in SDK")
+            
             # Create Agent Engine with Memory Bank config
             reasoning_engine = reasoning_engine_types.ReasoningEngine(
                 display_name="shadow-director-memory-bank",
                 spec=reasoning_engine_types.ReasoningEngineSpec(
-                    # Memory Bank configuration
-                    class_methods=[]
+                    # Memory Bank configuration - use empty dict if class_methods not supported
+                    class_methods=[] if hasattr(reasoning_engine_types.ReasoningEngineSpec, 'class_methods') else None
                 )
             )
             
-            request = reasoning_engine_types.CreateReasoningEngineRequest(
-                parent=self.parent,
-                reasoning_engine=reasoning_engine
-            )
+            # Try direct method first (newer API)
+            try:
+                operation = self.client.create_reasoning_engine(
+                    parent=self.parent,
+                    reasoning_engine=reasoning_engine
+                )
+            except TypeError:
+                # Fallback to request object
+                request = reasoning_engine_types.CreateReasoningEngineRequest(
+                    parent=self.parent,
+                    reasoning_engine=reasoning_engine
+                )
+                operation = self.client.create_reasoning_engine(request=request)
             
-            operation = self.client.create_reasoning_engine(request=request)
             result = operation.result()
             
             logging.info(f"[MEMORY_BANK] Created new Agent Engine: {result.name}")

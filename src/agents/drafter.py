@@ -1,10 +1,11 @@
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple, List
 import yaml
 import os
 from google import genai
 from google.genai.types import HttpOptions
 from src.tools.gdocs_tool import GoogleDocsTool
 from src.memory.profile_manager import ProfileManager
+from src.tools.file_downloader import FileDownloader
 
 class DrafterAgent:
     def __init__(self):
@@ -33,6 +34,7 @@ class DrafterAgent:
         if not self.model_name:
              raise ValueError("interviewer_model (for drafter) not found in config")
         self.docs_tool = GoogleDocsTool()
+        self.file_downloader = FileDownloader()
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -42,15 +44,19 @@ class DrafterAgent:
             print(f"Error loading config: {e}")
             return {}
 
-    def _research_grant_format(self, grant_name: str) -> str:
+    def _research_grant_format(self, grant_name: str, user_id: str) -> Tuple[str, List[Tuple[str, str]]]:
         """
         Researches the grant application format using Google Search Grounding.
+        Also attempts to find and download application format files.
         
         Args:
             grant_name: Name of the grant to research
+            user_id: User ID for file organization
             
         Returns:
-            Application format information (questions, requirements, etc.)
+            Tuple of (format_info, downloaded_files)
+            - format_info: Application format information text
+            - downloaded_files: List of (file_path, filename) tuples
         """
         import logging
         from google.genai.types import GenerateContentConfig, Tool, GoogleSearch
@@ -67,6 +73,7 @@ class DrafterAgent:
 2. 各項目の文字数制限や記入例
 3. 審査のポイント・評価基準
 4. 必要な添付書類
+5. **重要**: 申請書のフォーマットファイル（PDF、Word、Excelなど）のダウンロードURLがあれば特定してください
 
 出力形式:
 ## 申請書フォーマット
@@ -83,6 +90,10 @@ class DrafterAgent:
 ### 必要書類
 - [書類1]
 - [書類2]
+
+### 申請フォーマットファイル
+- URL: [ダウンロードURL]（見つかった場合のみ記載）
+- ファイル形式: [PDF/Word/Excel等]
 
 ※見つからない場合は一般的な助成金申請書の形式を想定してください。
 """
@@ -102,12 +113,46 @@ class DrafterAgent:
             
             format_info = response.text
             logging.info(f"[DRAFTER] Format research completed, length: {len(format_info)} chars")
-            return format_info
+            
+            # Try to extract file URLs from the response
+            downloaded_files = []
+            failed_urls = []
+            import re
+            url_pattern = r'https?://[^\s<>"\)]+\.(?:pdf|doc|docx|xls|xlsx|zip)'
+            found_urls = re.findall(url_pattern, format_info, re.IGNORECASE)
+            
+            if found_urls:
+                logging.info(f"[DRAFTER] Found {len(found_urls)} potential format file URLs")
+                for url in found_urls[:3]:  # Limit to first 3 URLs to avoid too many downloads
+                    logging.info(f"[DRAFTER] Attempting to download: {url}")
+                    result = self.file_downloader.download_file(url, user_id)
+                    if result:
+                        downloaded_files.append(result)
+                        logging.info(f"[DRAFTER] Successfully downloaded: {result[1]}")
+                    else:
+                        failed_urls.append(url)
+                        logging.warning(f"[DRAFTER] Failed to download: {url}")
+                
+                # Add download summary to format_info
+                if downloaded_files or failed_urls:
+                    summary = "\n\n---\n## 📎 フォーマットファイルのダウンロード結果\n\n"
+                    if downloaded_files:
+                        summary += f"✅ **ダウンロード成功**: {len(downloaded_files)}件\n"
+                        for file_path, filename in downloaded_files:
+                            summary += f"  - {filename}\n"
+                    if failed_urls:
+                        summary += f"\n⚠️ **ダウンロード失敗**: {len(failed_urls)}件\n"
+                        summary += "  （URLが無効、またはアクセスできませんでした）\n"
+                    format_info += summary
+            else:
+                logging.info("[DRAFTER] No format file URLs found in search results")
+            
+            return (format_info, downloaded_files)
             
         except Exception as e:
             logging.error(f"[DRAFTER] Format research failed: {e}")
             # Return generic format as fallback
-            return """
+            return ("""
 ## 申請書フォーマット（一般的な形式）
 
 ### 質問項目
@@ -123,14 +168,15 @@ class DrafterAgent:
 - 実現可能性
 - 団体の実績と信頼性
 - 費用対効果
-"""
+""", [])
 
-    def create_draft(self, user_id: str, grant_info: str) -> tuple[str, str, str]:
+    def create_draft(self, user_id: str, grant_info: str) -> tuple[str, str, str, List[Tuple[str, str]]]:
         """
         Generates a grant application draft based on researched format.
         
         Returns:
-            tuple: (message, draft_content, filename)
+            tuple: (message, draft_content, filename, format_files)
+            - format_files: List of (file_path, filename) tuples for downloaded files
         """
         import logging
         logging.info(f"[DRAFTER] create_draft started for user: {user_id}")
@@ -152,7 +198,7 @@ class DrafterAgent:
         
         # Step 1: Research the application format
         logging.info(f"[DRAFTER] Step 1: Researching format for '{grant_name}'")
-        format_info = self._research_grant_format(grant_name)
+        format_info, format_files = self._research_grant_format(grant_name, user_id)
         
         # Step 2: Generate draft based on format
         logging.info(f"[DRAFTER] Step 2: Generating format-aware draft")
@@ -238,12 +284,12 @@ class DrafterAgent:
             message = f"ドラフトを作成しました: {file_path}"
             
             logging.info(f"[DRAFTER] create_draft completed successfully")
-            return (message, draft_content, filename)
+            return (message, draft_content, filename, format_files)
             
         except Exception as e:
             logging.error(f"[DRAFTER] Error in create_draft: {e}", exc_info=True)
             error_msg = f"ドラフト作成エラー: {e}"
-            return (error_msg, "", "")
+            return (error_msg, "", "", [])
 
 
     def list_drafts(self, user_id: str) -> str:
