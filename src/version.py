@@ -4,8 +4,8 @@ Shadow Director Version Information
 """
 
 # バージョン情報
-__version__ = "1.0.0"
-__update_date__ = "2025-12-31"
+__version__ = "1.1.0"
+__update_date__ = "2026-01-01"
 
 # 最新の追加機能リスト
 LATEST_FEATURES = [
@@ -15,6 +15,7 @@ LATEST_FEATURES = [
     "月次活動サマリレポート自動生成",
     "助成金フォーマットファイルのダウンロード・提供機能",
     "共鳴度スコアによる助成金マッチング",
+    "ObserverAgentのリファクタリング（URL検証・検索精度の向上）",
 ]
 
 

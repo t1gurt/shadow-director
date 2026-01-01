@@ -111,19 +111,51 @@ class DrafterAgent:
                 )
             )
             
+            
             format_info = response.text
             logging.info(f"[DRAFTER] Format research completed, length: {len(format_info)} chars")
             
-            # Try to extract file URLs from the response
-            downloaded_files = []
-            failed_urls = []
+            # 1. Extract file URLs from the text response
             import re
             url_pattern = r'https?://[^\s<>"\)]+\.(?:pdf|doc|docx|xls|xlsx|zip)'
-            found_urls = re.findall(url_pattern, format_info, re.IGNORECASE)
+            found_urls = set(re.findall(url_pattern, format_info, re.IGNORECASE))
+            
+            # 2. Extract page URLs from Grounding Metadata and deep search
+            try:
+                if response.candidates and response.candidates[0].grounding_metadata:
+                    metadata = response.candidates[0].grounding_metadata
+                    if hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
+                        for chunk in metadata.grounding_chunks:
+                            if hasattr(chunk, 'web') and chunk.web and chunk.web.uri:
+                                page_url = chunk.web.uri
+                                
+                                # Resolve redirect if needed (simple version)
+                                if 'grounding-api-redirect' in page_url:
+                                    try:
+                                        import requests
+                                        res = requests.head(page_url, allow_redirects=True, timeout=5)
+                                        page_url = res.url
+                                    except:
+                                        pass
+                                
+                                logging.info(f"[DRAFTER] Deep searching page for files: {page_url}")
+                                page_files = self.file_downloader.find_files_in_page(page_url)
+                                found_urls.update(page_files)
+            except Exception as e:
+                logging.error(f"[DRAFTER] Error in deep search: {e}")
+            
+            downloaded_files = []
+            failed_urls = []
             
             if found_urls:
-                logging.info(f"[DRAFTER] Found {len(found_urls)} potential format file URLs")
-                for url in found_urls[:3]:  # Limit to first 3 URLs to avoid too many downloads
+                # Convert set back to list and sort to prioritize generic names? No, just list.
+                url_list = list(found_urls)
+                logging.info(f"[DRAFTER] Found {len(url_list)} potential format file URLs")
+                
+                # Filter out likely irrelevant files (images, common assets) if extension check failed
+                # But regex ensures extension is valid.
+                
+                for url in url_list[:5]:  # Limit to first 5 URLs (increased from 3)
                     logging.info(f"[DRAFTER] Attempting to download: {url}")
                     result = self.file_downloader.download_file(url, user_id)
                     if result:
@@ -145,7 +177,7 @@ class DrafterAgent:
                         summary += "  （URLが無効、またはアクセスできませんでした）\n"
                     format_info += summary
             else:
-                logging.info("[DRAFTER] No format file URLs found in search results")
+                logging.info("[DRAFTER] No format file URLs found in search results or pages")
             
             return (format_info, downloaded_files)
             

@@ -48,6 +48,7 @@ NPO法人の代表者は、想いと行動力を持ちながらも、常に事�
 - **Tech:** Gemini 3.0 Flash + Google Search Grounding
 - **Features:**
   - **Google Search Grounding**: 助成金情報や企業のCSR活動を検索
+  - **Enhanced Verification**: 公式サイトのURL検証と品質評価（信頼性スコア）機能を強化
   - **Resonance Reasoning**: 財団の理念と自団体の「Soul Profile」の共鳴度（マッチ度）を推論
   - **自律的トリガー**: ユーザーが「助成金を探して」と言うか、インタビュー完了時に自動実行
   - **週次スケジュール**: Discord Tasks Loopによる定期実行（168時間/週）

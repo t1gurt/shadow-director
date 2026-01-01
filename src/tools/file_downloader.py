@@ -259,3 +259,54 @@ class FileDownloader:
             'extension': path.suffix.lower(),
             'path': str(path)
         }
+
+    def find_files_in_page(self, page_url: str) -> list[str]:
+        """
+        Scrapes a webpage to find URLs of supported file types.
+        
+        Args:
+            page_url: The URL of the webpage to scrape
+            
+        Returns:
+            List of found file URLs (absolute URLs)
+        """
+        found_urls = set()
+        
+        try:
+            self.logger.info(f"[FINDER] Scraping page for files: {page_url}")
+            
+            # Fetch page content
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(page_url, headers=headers, timeout=10)
+            
+            if response.status_code != 200:
+                self.logger.warning(f"[FINDER] Failed to fetch page: {response.status_code}")
+                return []
+                
+            content = response.text
+            
+            # Simple regex to find href links with supported extensions
+            # Matches href="val" or href='val'
+            import re
+            from urllib.parse import urljoin
+            
+            # Extensions regex pattern
+            ext_pattern = '|'.join([re.escape(ext) for ext in self.SUPPORTED_EXTENSIONS.keys()])
+            # Pattern: href=["']([^"']+\.(?:pdf|doc|docx|xls|xlsx|zip))["']
+            link_pattern = r'href=["\']([^"\']+\.(?:' + ext_pattern.replace('.', '') + r'))["\']'
+            
+            matches = re.findall(link_pattern, content, re.IGNORECASE)
+            
+            for match in matches:
+                # Convert to absolute URL
+                absolute_url = urljoin(page_url, match)
+                found_urls.add(absolute_url)
+                
+            self.logger.info(f"[FINDER] Found {len(found_urls)} potential files in {page_url}")
+            return list(found_urls)
+            
+        except Exception as e:
+            self.logger.error(f"[FINDER] Error scraping page: {e}")
+            return []

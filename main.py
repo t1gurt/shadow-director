@@ -4,6 +4,7 @@ from discord.ext import tasks
 from dotenv import load_dotenv
 from src.agents.orchestrator import Orchestrator
 from src.version import __version__, __update_date__
+from src.utils.progress_notifier import set_progress_callback, get_progress_notifier
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
@@ -182,12 +183,35 @@ async def on_message(message):
             return
         
         try:
+            # Set up progress notification callback for this channel
+            # Capture the current event loop (main thread loop)
+            loop = asyncio.get_running_loop()
+            
+            async def send_progress(msg: str):
+                try:
+                    await message.channel.send(msg)
+                except Exception as e:
+                    logging.error(f"[PROGRESS] Failed to send progress: {e}")
+            
+            # Create a wrapper that can be called from sync code (running in other threads)
+            def progress_callback(msg: str):
+                # Schedule the async send in the main event loop
+                try:
+                    # Use the captured loop to schedule the task safely from another thread
+                    loop.call_soon_threadsafe(
+                        lambda: loop.create_task(send_progress(msg))
+                    )
+                except Exception as e:
+                    logging.error(f"[PROGRESS] Callback error: {e}")
+            
+            # Set the global progress callback
+            set_progress_callback(progress_callback)
+            
             # Show typing indicator
             async with message.channel.typing():
                 if orchestrator:
                     # Always route through orchestrator, which will handle attachments appropriately
                     # Run potentially blocking synchronous code in a separate thread to avoid blocking the event loop
-                    import asyncio
                     response = await asyncio.to_thread(
                         orchestrator.route_message,
                         user_input, 
