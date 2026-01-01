@@ -4,11 +4,14 @@ Shadow Director Version Information
 """
 
 # バージョン情報
-__version__ = "1.1.0"
-__update_date__ = "2026-01-01"
+__version__ = "1.2.0"
+__update_date__ = "2026-01-02"
 
 # 最新の追加機能リスト
 LATEST_FEATURES = [
+    "Playwrightベースのサイト探索機能を追加",
+    "助成金ページの深掘り検索によるフォーマットファイル自動検出",
+    "DOM解析による募集締切日の自動抽出",
     "バージョン情報確認コマンドを追加",
     "助成金申請書の自動ドラフト生成機能",
     "SNS投稿記事作成機能（Facebook/Instagram対応）",

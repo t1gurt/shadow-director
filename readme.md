@@ -45,9 +45,10 @@ NPO法人の代表者は、想いと行動力を持ちながらも、常に事�
 
 **「あなたが寝ている間に、チャンスを見つけ出す。」**
 
-- **Tech:** Gemini 3.0 Flash + Google Search Grounding
+- **Tech:** Gemini 3.0 Flash + Google Search Grounding + Playwright
 - **Features:**
   - **Google Search Grounding**: 助成金情報や企業のCSR活動を検索
+  - **Playwright Site Explorer**: DOM解析によるサイト深掘り検索、フォーマットファイル自動検出
   - **Enhanced Verification**: 公式サイトのURL検証と品質評価（信頼性スコア）機能を強化
   - **Resonance Reasoning**: 財団の理念と自団体の「Soul Profile」の共鳴度（マッチ度）を推論
   - **自律的トリガー**: ユーザーが「助成金を探して」と言うか、インタビュー完了時に自動実行
@@ -124,6 +125,7 @@ graph TD
 - **Gemini 3.0 Pro (Preview)**: 推論・執筆・戦略立案（インタビュアー、ドラフター）
 - **Gemini 3.0 Flash (Preview)**: チャット・検索・一次選別（オブザーバー）
 - **Google Search Grounding**: リアルタイム情報検索
+- **Playwright**: ヘッドレスブラウザによるDOM解析・サイト探索
 
 ### Platform & Infrastructure
 - **Google Cloud Run**: フルマネージドコンテナ実行環境
@@ -163,7 +165,12 @@ shadow-director/
 │   ├── tools/
 │   │   ├── file_processor.py     # PDF/URL処理ユーティリティ
 │   │   ├── search_tool.py        # Google Search Grounding設定
-│   │   └── gdocs_tool.py         # Google Docs API Tool
+│   │   ├── gdocs_tool.py         # Google Docs API Tool
+│   │   └── site_explorer.py      # Playwright基盤クラス
+│   ├── logic/
+│   │   ├── grant_finder.py       # 助成金検索ロジック
+│   │   ├── grant_validator.py    # URL検証・品質評価
+│   │   └── grant_page_scraper.py # Playwright助成金ページスクレイパー
 │   └── memory/
 │       └── profile_manager.py    # GCS操作 (プロファイル管理)
 └── config/
