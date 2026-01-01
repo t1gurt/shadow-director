@@ -1,14 +1,17 @@
 import re
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional
 from google.genai.types import GenerateContentConfig
 from src.tools.search_tool import SearchTool
 from src.logic.grant_validator import GrantValidator
+from src.logic.grant_page_scraper import GrantPageScraper
 from src.utils.progress_notifier import get_progress_notifier, ProgressStage
 
 class GrantFinder:
     """
     Handles grant search operations including query generation and official page lookup.
+    Uses Playwright-based GrantPageScraper for enhanced page verification.
     """
     
     def __init__(self, client, model_name: str, config: Dict[str, Any]):
@@ -17,6 +20,7 @@ class GrantFinder:
         self.config = config
         self.search_tool = SearchTool()
         self.validator = GrantValidator()
+        self.page_scraper = GrantPageScraper()
         self.system_prompt = self.config.get("system_prompts", {}).get("observer", "")
 
     def generate_queries(self, profile: str) -> List[str]:
@@ -297,6 +301,27 @@ class GrantFinder:
                 
                 if is_accessible and final_url:
                     result['official_url'] = final_url
+                    
+                    # Enhanced verification with Playwright
+                    try:
+                        logging.info(f"[GRANT_FINDER] Running Playwright verification for: {final_url}")
+                        playwright_result = self._run_playwright_verification(final_url, grant_name)
+                        
+                        if playwright_result:
+                            result['playwright_verified'] = True
+                            result['playwright_confidence'] = playwright_result.get('confidence', 0)
+                            result['format_files'] = playwright_result.get('format_files', [])
+                            
+                            # Update deadline info if found
+                            if playwright_result.get('deadline_info'):
+                                deadline = playwright_result['deadline_info']
+                                if deadline.get('date'):
+                                    result['deadline_end'] = deadline['date']
+                            
+                            logging.info(f"[GRANT_FINDER] Playwright found {len(result.get('format_files', []))} format files")
+                    except Exception as pw_error:
+                        logging.warning(f"[GRANT_FINDER] Playwright verification failed: {pw_error}")
+                        result['playwright_verified'] = False
                 else:
                     # Retry logic
                     return self._retry_find_official_page(grant_name, result, access_status)
@@ -307,6 +332,44 @@ class GrantFinder:
             logging.error(f"[GRANT_FINDER] Error finding official page: {e}")
         
         return result
+    
+    def _run_playwright_verification(self, url: str, grant_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Run Playwright-based page verification.
+        Wraps async call for synchronous usage.
+        """
+        try:
+            return asyncio.run(self._async_playwright_verification(url, grant_name))
+        except RuntimeError:
+            # If there's already an event loop running, use a different approach
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    asyncio.run, 
+                    self._async_playwright_verification(url, grant_name)
+                )
+                return future.result(timeout=60)
+    
+    async def _async_playwright_verification(self, url: str, grant_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Async Playwright verification.
+        """
+        try:
+            grant_info = await self.page_scraper.find_grant_info(url, grant_name)
+            
+            if not grant_info.get('accessible'):
+                return None
+            
+            return {
+                'verified': True,
+                'confidence': 80 if grant_info.get('format_files') else 50,
+                'format_files': grant_info.get('format_files', []),
+                'deadline_info': grant_info.get('deadline_info'),
+                'related_links': grant_info.get('related_links', [])
+            }
+        except Exception as e:
+            logging.error(f"[GRANT_FINDER] Async Playwright error: {e}")
+            return None
 
     def _retry_find_official_page(self, grant_name: str, previous_result: Dict, failure_reason: str) -> Dict:
         """

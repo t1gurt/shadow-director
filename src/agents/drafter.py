@@ -1,11 +1,14 @@
 from typing import Dict, Any, Optional, Tuple, List
 import yaml
 import os
+import asyncio
+import logging
 from google import genai
 from google.genai.types import HttpOptions
 from src.tools.gdocs_tool import GoogleDocsTool
 from src.memory.profile_manager import ProfileManager
 from src.tools.file_downloader import FileDownloader
+from src.logic.grant_page_scraper import GrantPageScraper
 
 class DrafterAgent:
     def __init__(self):
@@ -35,6 +38,7 @@ class DrafterAgent:
              raise ValueError("interviewer_model (for drafter) not found in config")
         self.docs_tool = GoogleDocsTool()
         self.file_downloader = FileDownloader()
+        self.page_scraper = GrantPageScraper()
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -177,7 +181,22 @@ class DrafterAgent:
                         summary += "  （URLが無効、またはアクセスできませんでした）\n"
                     format_info += summary
             else:
-                logging.info("[DRAFTER] No format file URLs found in search results or pages")
+                logging.info("[DRAFTER] No format file URLs found in search results, trying Playwright deep search...")
+                
+                # Fallback: Use Playwright for deep search
+                try:
+                    playwright_files = self._run_playwright_deep_search(grant_name, user_id)
+                    if playwright_files:
+                        downloaded_files.extend(playwright_files)
+                        summary = "\n\n---\n## 📎 Playwright深掘り検索の結果\n\n"
+                        summary += f"✅ **ダウンロード成功**: {len(playwright_files)}件\n"
+                        for file_path, filename in playwright_files:
+                            summary += f"  - {filename}\n"
+                        format_info += summary
+                    else:
+                        logging.info("[DRAFTER] Playwright deep search also found no files")
+                except Exception as pw_error:
+                    logging.warning(f"[DRAFTER] Playwright deep search failed: {pw_error}")
             
             return (format_info, downloaded_files)
             
@@ -201,6 +220,81 @@ class DrafterAgent:
 - 団体の実績と信頼性
 - 費用対効果
 """, [])
+
+    def _run_playwright_deep_search(self, grant_name: str, user_id: str) -> List[Tuple[str, str]]:
+        """
+        Run Playwright-based deep search for format files.
+        Explores grant organization's website to find application forms.
+        """
+        try:
+            # Extract organization name for targeted search
+            from src.logic.grant_validator import GrantValidator
+            validator = GrantValidator()
+            org_name = validator.extract_organization_name(grant_name)
+            
+            if not org_name:
+                logging.info("[DRAFTER] Could not extract organization name for Playwright search")
+                return []
+            
+            # Build search URL (use Google to find organization's grant page)
+            search_query = f"{org_name} 助成金 申請書 様式"
+            search_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
+            
+            logging.info(f"[DRAFTER] Playwright deep search for: {org_name}")
+            
+            # Run async search
+            return asyncio.run(self._async_playwright_deep_search(search_url, grant_name, user_id))
+            
+        except RuntimeError:
+            # If there's already an event loop running
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    asyncio.run,
+                    self._async_playwright_deep_search(search_url, grant_name, user_id)
+                )
+                return future.result(timeout=120)
+        except Exception as e:
+            logging.error(f"[DRAFTER] Playwright deep search error: {e}")
+            return []
+    
+    async def _async_playwright_deep_search(
+        self, 
+        start_url: str, 
+        grant_name: str, 
+        user_id: str
+    ) -> List[Tuple[str, str]]:
+        """
+        Async Playwright deep search for format files.
+        """
+        downloaded_files = []
+        
+        try:
+            # Use deep search to find format files
+            format_files = await self.page_scraper.deep_search_format_files(start_url, max_depth=2)
+            
+            if not format_files:
+                logging.info("[DRAFTER] Playwright found no format files")
+                return []
+            
+            logging.info(f"[DRAFTER] Playwright found {len(format_files)} potential files")
+            
+            # Download top-scored files
+            for file_info in format_files[:5]:
+                file_url = file_info.get('url')
+                if not file_url:
+                    continue
+                
+                logging.info(f"[DRAFTER] Downloading: {file_url}")
+                result = self.file_downloader.download_file(file_url, user_id)
+                if result:
+                    downloaded_files.append(result)
+                    logging.info(f"[DRAFTER] Downloaded: {result[1]}")
+                    
+        except Exception as e:
+            logging.error(f"[DRAFTER] Async deep search error: {e}")
+        
+        return downloaded_files
 
     def create_draft(self, user_id: str, grant_info: str) -> tuple[str, str, str, List[Tuple[str, str]]]:
         """
