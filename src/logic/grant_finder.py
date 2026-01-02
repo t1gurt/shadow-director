@@ -398,7 +398,10 @@ class GrantFinder:
     def _retry_find_official_page(self, grant_name: str, previous_result: Dict, failure_reason: str) -> Dict:
         """
         Retries finding the official page if the first attempt failed validation.
-        Uses organization name + targeted keywords for better search accuracy.
+        Enhanced with:
+        1. Multiple search query variations
+        2. Playwright-based site exploration
+        3. Up to 3 retry attempts
         """
         logging.info(f"[GRANT_FINDER] Retrying for: {grant_name}")
         notifier = get_progress_notifier()
@@ -407,15 +410,33 @@ class GrantFinder:
         # Extract organization name for targeted retry search
         org_name = self.validator.extract_organization_name(grant_name)
         
+        # Define multiple search strategies
+        search_queries = []
         if org_name:
+            search_queries = [
+                f"{org_name} 助成金 募集 2026",
+                f"{org_name} 補助金 申請",
+                f"{org_name} 支援 公募",
+                f"{org_name} 公式サイト 助成",
+            ]
+        else:
+            search_queries = [
+                f"{grant_name} 公式",
+                f"{grant_name} 申請",
+            ]
+        
+        # Try up to 3 different search strategies
+        max_retries = min(3, len(search_queries))
+        
+        for retry_num in range(max_retries):
+            query = search_queries[retry_num]
+            notifier.notify_sync(ProgressStage.SEARCHING, f"代替検索 ({retry_num + 1}/{max_retries})", f"検索: {query[:40]}...")
+            logging.info(f"[GRANT_FINDER] Retry {retry_num + 1}: searching with '{query}'")
+            
             retry_prompt = f"""
-助成金の公式申請ページを再検索してください。
-前回見つけたURL ({previous_result['official_url']}) は無効でした（理由: {failure_reason}）。
+助成金の公式申請ページを検索してください。
 
-**検索戦略（重要）:**
-1. 「{org_name} 助成金 募集 2026」で検索
-2. 「{org_name} 公式サイト」で組織のトップページを見つける
-3. 組織サイト内の「助成金」「支援」「募集」ページを探す
+**検索クエリ:** {query}
 
 **探している助成金:** {grant_name}
 
@@ -427,54 +448,106 @@ class GrantFinder:
 **出力形式:**
 - **公式URL**: [正確なURL]
 """
-        else:
-            retry_prompt = f"""
-助成金「{grant_name}」の公式申請ページを再検索してください。
-前回見つけたURL ({previous_result['official_url']}) は無効でした（理由: {failure_reason}）。
-
-**重要条件:**
-1. 財団・企業・行政の公式サイトのみ
-2. 実際にアクセス可能なページ
-3. .or.jp, .go.jp, .org など公式ドメイン優先
-
-**出力形式:**
-- **公式URL**: [正確なURL]
-"""
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=retry_prompt,
-                config=GenerateContentConfig(
-                    tools=[self.search_tool.get_tool_config()],
-                    temperature=0.1
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=retry_prompt,
+                    config=GenerateContentConfig(
+                        tools=[self.search_tool.get_tool_config()],
+                        temperature=0.1
+                    )
                 )
-            )
+                
+                retry_url_match = re.search(r'\*\*公式URL\*\*:\s*(.+)', response.text)
+                if retry_url_match:
+                    retry_url = retry_url_match.group(1).strip()
+                    retry_url = self.validator.resolve_redirect_url(retry_url)
+                    
+                    # Skip if same as failed URL
+                    if retry_url == previous_result.get('official_url'):
+                        logging.info(f"[GRANT_FINDER] Same URL found, trying next query")
+                        continue
+                    
+                    is_retry_accessible, retry_status, retry_final_url = self.validator.validate_url_accessible(retry_url)
+                    
+                    if is_retry_accessible and retry_final_url:
+                        notifier.notify_sync(ProgressStage.ANALYZING, f"✅ 代替URL発見 (試行{retry_num + 1})", retry_final_url[:60])
+                        
+                        previous_result['official_url'] = retry_final_url
+                        previous_result['url_accessible'] = True
+                        previous_result['url_access_status'] = f"リトライ成功（試行{retry_num + 1}）"
+                        logging.info(f"[GRANT_FINDER] Retry {retry_num + 1} successful: {retry_final_url}")
+                        return previous_result
+                    else:
+                        logging.info(f"[GRANT_FINDER] Retry {retry_num + 1} URL not accessible: {retry_status}")
+                        
+            except Exception as retry_e:
+                logging.error(f"[GRANT_FINDER] Retry {retry_num + 1} error: {retry_e}")
+        
+        # All LLM retries failed - try Playwright exploration as last resort
+        if org_name:
+            notifier.notify_sync(ProgressStage.SEARCHING, "🔍 Playwright深掘り検索中...", f"組織サイトを探索: {org_name}")
+            playwright_url = self._playwright_find_grant_page(org_name, grant_name)
             
-            retry_url_match = re.search(r'\*\*公式URL\*\*:\s*(.+)', response.text)
-            if retry_url_match:
-                retry_url = retry_url_match.group(1).strip()
-                retry_url = self.validator.resolve_redirect_url(retry_url)
-                
-                is_retry_accessible, retry_status, retry_final_url = self.validator.validate_url_accessible(retry_url)
-                
-                if is_retry_accessible and retry_final_url:
-                    previous_result['official_url'] = retry_final_url
+            if playwright_url:
+                is_accessible, status, final_url = self.validator.validate_url_accessible(playwright_url)
+                if is_accessible and final_url:
+                    notifier.notify_sync(ProgressStage.ANALYZING, "✅ Playwrightで代替URL発見", final_url[:60])
+                    previous_result['official_url'] = final_url
                     previous_result['url_accessible'] = True
-                    previous_result['url_access_status'] = "リトライ成功"
-                    logging.info(f"[GRANT_FINDER] Retry successful: {retry_final_url}")
+                    previous_result['url_access_status'] = "Playwright検索で発見"
+                    logging.info(f"[GRANT_FINDER] Playwright found: {final_url}")
                     return previous_result
-                else:
-                    previous_result['is_valid'] = False
-                    previous_result['url_accessible'] = False
-                    previous_result['url_access_status'] = f"リトライも失敗: {retry_status}"
-                    previous_result['exclude_reason'] = f"URL検証失敗（初回: {failure_reason}, リトライ: {retry_status}）"
-            else:
-                 previous_result['is_valid'] = False
-                 previous_result['exclude_reason'] = "代替URLが見つかりませんでした"
-                 
-        except Exception as retry_e:
-            logging.error(f"[GRANT_FINDER] Retry error: {retry_e}")
-            previous_result['is_valid'] = False
-            previous_result['exclude_reason'] = "リトライ中にエラー発生"
-            
+        
+        # All retries failed
+        notifier.notify_sync(ProgressStage.WARNING, "❌ 代替URLが見つかりませんでした", f"{max_retries}回の検索とPlaywright探索で発見できず")
+        previous_result['is_valid'] = False
+        previous_result['url_accessible'] = False
+        previous_result['exclude_reason'] = f"URL検証失敗（{max_retries}回リトライ + Playwright探索失敗）"
+        
         return previous_result
+    
+    def _playwright_find_grant_page(self, org_name: str, grant_name: str) -> Optional[str]:
+        """
+        Use Playwright to find grant page by exploring organization's website.
+        """
+        try:
+            import nest_asyncio
+            nest_asyncio.apply()
+            return asyncio.run(self._async_playwright_find_grant_page(org_name, grant_name))
+        except Exception as e:
+            logging.error(f"[GRANT_FINDER] Playwright search error: {e}")
+            return None
+    
+    async def _async_playwright_find_grant_page(self, org_name: str, grant_name: str) -> Optional[str]:
+        """
+        Async Playwright search for grant page.
+        Searches Google for organization site, then explores for grant pages.
+        """
+        try:
+            # Search for organization's official site
+            search_url = f"https://www.google.com/search?q={org_name}+公式サイト+助成金"
+            
+            grant_info = await self.page_scraper.find_grant_info(search_url, grant_name)
+            
+            if grant_info.get('accessible'):
+                # Look for related links that might be grant pages
+                related = grant_info.get('related_links', [])
+                for link in related[:5]:
+                    href = link.get('href', '')
+                    text = link.get('text', '')
+                    
+                    # Check if link looks like a grant page
+                    combined = (href + text).lower()
+                    grant_keywords = ['助成', '補助', '支援', '募集', '公募', '申請']
+                    
+                    if any(kw in combined for kw in grant_keywords):
+                        logging.info(f"[GRANT_FINDER] Playwright found potential grant page: {href}")
+                        return href
+            
+            return None
+            
+        except Exception as e:
+            logging.error(f"[GRANT_FINDER] Async Playwright search error: {e}")
+            return None
+
