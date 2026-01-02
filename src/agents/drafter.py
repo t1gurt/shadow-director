@@ -224,9 +224,12 @@ class DrafterAgent:
     def _run_playwright_deep_search(self, grant_name: str, user_id: str) -> List[Tuple[str, str]]:
         """
         Run Playwright-based deep search for format files.
-        Explores grant organization's website to find application forms.
+        Uses nest_asyncio to allow running async code within Discord.py's event loop.
         """
         try:
+            import nest_asyncio
+            nest_asyncio.apply()
+            
             # Extract organization name for targeted search
             from src.logic.grant_validator import GrantValidator
             validator = GrantValidator()
@@ -242,18 +245,9 @@ class DrafterAgent:
             
             logging.info(f"[DRAFTER] Playwright deep search for: {org_name}")
             
-            # Run async search
+            # Now we can safely run asyncio.run() within the existing event loop
             return asyncio.run(self._async_playwright_deep_search(search_url, grant_name, user_id))
             
-        except RuntimeError:
-            # If there's already an event loop running
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    asyncio.run,
-                    self._async_playwright_deep_search(search_url, grant_name, user_id)
-                )
-                return future.result(timeout=120)
         except Exception as e:
             logging.error(f"[DRAFTER] Playwright deep search error: {e}")
             return []

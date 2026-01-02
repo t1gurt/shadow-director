@@ -362,19 +362,17 @@ class GrantFinder:
     def _run_playwright_verification(self, url: str, grant_name: str) -> Optional[Dict[str, Any]]:
         """
         Run Playwright-based page verification.
-        Wraps async call for synchronous usage.
+        Uses nest_asyncio to allow running async code within Discord.py's event loop.
         """
         try:
+            import nest_asyncio
+            nest_asyncio.apply()
+            
+            # Now we can safely run asyncio.run() within the existing event loop
             return asyncio.run(self._async_playwright_verification(url, grant_name))
-        except RuntimeError:
-            # If there's already an event loop running, use a different approach
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    asyncio.run, 
-                    self._async_playwright_verification(url, grant_name)
-                )
-                return future.result(timeout=60)
+        except Exception as e:
+            logging.error(f"[GRANT_FINDER] Playwright verification error: {e}")
+            return None
     
     async def _async_playwright_verification(self, url: str, grant_name: str) -> Optional[Dict[str, Any]]:
         """
