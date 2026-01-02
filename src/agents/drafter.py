@@ -48,7 +48,7 @@ class DrafterAgent:
             print(f"Error loading config: {e}")
             return {}
 
-    def _research_grant_format(self, grant_name: str, user_id: str) -> Tuple[str, List[Tuple[str, str]]]:
+    def _research_grant_format(self, grant_name: str, user_id: str, grant_url: str = None) -> Tuple[str, List[Tuple[str, str]]]:
         """
         Researches the grant application format using Google Search Grounding.
         Also attempts to find and download application format files.
@@ -56,6 +56,7 @@ class DrafterAgent:
         Args:
             grant_name: Name of the grant to research
             user_id: User ID for file organization
+            grant_url: Optional URL of the grant page (from Observer)
             
         Returns:
             Tuple of (format_info, downloaded_files)
@@ -65,7 +66,25 @@ class DrafterAgent:
         import logging
         from google.genai.types import GenerateContentConfig, Tool, GoogleSearch
         
-        logging.info(f"[DRAFTER] Researching format for: {grant_name}")
+        logging.info(f"[DRAFTER] Researching format for: {grant_name}, URL: {grant_url}")
+        
+        # If we have a URL from Observer, try Playwright scraping first
+        if grant_url and grant_url != 'N/A':
+            try:
+                logging.info(f"[DRAFTER] Using provided URL for direct scraping: {grant_url}")
+                playwright_files = self._scrape_url_for_files(grant_url, user_id)
+                if playwright_files:
+                    logging.info(f"[DRAFTER] Found {len(playwright_files)} files from provided URL")
+                    format_info = f"""
+## 申請フォーマット情報
+
+公式ページ ({grant_url}) から以下のフォーマットファイルを検出しました。
+
+詳細な申請方法は添付のファイルをご確認ください。
+"""
+                    return (format_info, playwright_files)
+            except Exception as e:
+                logging.warning(f"[DRAFTER] Direct URL scraping failed: {e}")
         
         research_prompt = f"""
 以下の助成金の申請書フォーマット（質問項目・記入欄）を調査してください。
@@ -221,6 +240,53 @@ class DrafterAgent:
 - 費用対効果
 """, [])
 
+    def _scrape_url_for_files(self, url: str, user_id: str) -> List[Tuple[str, str]]:
+        """
+        Scrape a specific URL for format files using Playwright.
+        This is used when we have a verified URL from Observer.
+        """
+        try:
+            import nest_asyncio
+            nest_asyncio.apply()
+            return asyncio.run(self._async_scrape_url_for_files(url, user_id))
+        except Exception as e:
+            logging.error(f"[DRAFTER] _scrape_url_for_files error: {e}")
+            return []
+    
+    async def _async_scrape_url_for_files(self, url: str, user_id: str) -> List[Tuple[str, str]]:
+        """
+        Async method to scrape a URL for format files.
+        """
+        downloaded_files = []
+        
+        try:
+            # Use page scraper to get grant info and files
+            grant_info = await self.page_scraper.find_grant_info(url, "")
+            
+            if not grant_info.get('accessible'):
+                logging.warning(f"[DRAFTER] Page not accessible: {url}")
+                return []
+            
+            format_files = grant_info.get('format_files', [])
+            logging.info(f"[DRAFTER] Found {len(format_files)} format files on page")
+            
+            # Download files
+            for file_info in format_files[:5]:
+                file_url = file_info.get('url')
+                if not file_url:
+                    continue
+                
+                logging.info(f"[DRAFTER] Downloading: {file_url}")
+                result = self.file_downloader.download_file(file_url, user_id)
+                if result:
+                    downloaded_files.append(result)
+                    logging.info(f"[DRAFTER] Downloaded: {result[1]}")
+                    
+        except Exception as e:
+            logging.error(f"[DRAFTER] Async scrape error: {e}")
+        
+        return downloaded_files
+
     def _run_playwright_deep_search(self, grant_name: str, user_id: str) -> List[Tuple[str, str]]:
         """
         Run Playwright-based deep search for format files.
@@ -306,19 +372,32 @@ class DrafterAgent:
         
         logging.info(f"[DRAFTER] Profile loaded, length: {len(profile)} chars")
         
-        # Extract grant name from grant_info for format research
+        # Extract grant name and URL from grant_info
         grant_name = grant_info.strip()
+        grant_url = None
+        
+        # Try to extract URL from grant_info
+        import re
+        url_match = re.search(r'URL:\s*(https?://[^\s]+)', grant_info)
+        if url_match:
+            grant_url = url_match.group(1).strip()
+            logging.info(f"[DRAFTER] Extracted URL from grant_info: {grant_url}")
+        
         # Try to extract just the grant name if it contains other info
-        if "助成" in grant_name:
+        name_match = re.search(r'助成金名:\s*(.+?)(?:\n|$)', grant_info)
+        if name_match:
+            grant_name = name_match.group(1).strip()
+        elif "助成" in grant_name:
             # Find the grant name pattern
-            import re
             match = re.search(r'[^\s]+助成[^\s]*', grant_name)
             if match:
                 grant_name = match.group(0)
         
-        # Step 1: Research the application format
+        logging.info(f"[DRAFTER] Grant name: {grant_name}, URL: {grant_url}")
+        
+        # Step 1: Research the application format (prioritize URL if available)
         logging.info(f"[DRAFTER] Step 1: Researching format for '{grant_name}'")
-        format_info, format_files = self._research_grant_format(grant_name, user_id)
+        format_info, format_files = self._research_grant_format(grant_name, user_id, grant_url=grant_url)
         
         # Step 2: Generate draft based on format
         logging.info(f"[DRAFTER] Step 2: Generating format-aware draft")

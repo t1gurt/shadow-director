@@ -418,8 +418,9 @@ class Orchestrator:
                 
                 # Format grant information for Drafter
                 grant_info = f"""助成金名: {opp['title']}
-URL: {opp.get('url', 'N/A')}
+URL: {opp.get('official_url', 'N/A')}
 金額: {opp.get('amount', 'N/A')}
+締切: {opp.get('deadline_end', 'N/A')}
 共鳴理由: {opp['reason']}
 
 この助成金の申請書ドラフトを作成してください。"""
