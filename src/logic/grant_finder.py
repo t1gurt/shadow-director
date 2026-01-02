@@ -287,9 +287,19 @@ class GrantFinder:
             
             # Validation Step
             if result['official_url'] != 'N/A':
+                notifier = get_progress_notifier()
+                
                 quality_score, quality_reason = self.validator.evaluate_url_quality(result['official_url'], grant_name)
                 result['url_quality_score'] = quality_score
                 result['url_quality_reason'] = quality_reason
+                
+                # Notify user about URL quality
+                if quality_score >= 70:
+                    notifier.notify_sync(ProgressStage.ANALYZING, f"✅ 信頼性評価: {quality_score}点", quality_reason)
+                elif quality_score >= 50:
+                    notifier.notify_sync(ProgressStage.ANALYZING, f"⚠️ 信頼性評価: {quality_score}点", quality_reason)
+                else:
+                    notifier.notify_sync(ProgressStage.WARNING, f"❌ 信頼性評価: {quality_score}点（低）", quality_reason)
                 
                 if quality_score < 50:
                     logging.warning(f"[GRANT_FINDER] Low quality URL: {result['official_url']}")
@@ -299,12 +309,20 @@ class GrantFinder:
                 result['url_accessible'] = is_accessible
                 result['url_access_status'] = access_status
                 
+                # Notify user about accessibility
+                if is_accessible:
+                    notifier.notify_sync(ProgressStage.ANALYZING, "✅ 公式ページにアクセス可能", f"URL: {final_url[:60]}...")
+                else:
+                    notifier.notify_sync(ProgressStage.WARNING, "❌ 公式ページにアクセス不可", access_status)
+                
                 if is_accessible and final_url:
                     result['official_url'] = final_url
                     
                     # Enhanced verification with Playwright
                     try:
                         logging.info(f"[GRANT_FINDER] Running Playwright verification for: {final_url}")
+                        notifier.notify_sync(ProgressStage.ANALYZING, "🔍 Playwrightで詳細検証中...", "ページ内容を解析しています")
+                        
                         playwright_result = self._run_playwright_verification(final_url, grant_name)
                         
                         if playwright_result:
@@ -312,13 +330,21 @@ class GrantFinder:
                             result['playwright_confidence'] = playwright_result.get('confidence', 0)
                             result['format_files'] = playwright_result.get('format_files', [])
                             
+                            # Notify Playwright results
+                            file_count = len(result.get('format_files', []))
+                            if file_count > 0:
+                                notifier.notify_sync(ProgressStage.ANALYZING, f"📎 フォーマットファイル {file_count}件 発見", "申請書様式を検出しました")
+                            
                             # Update deadline info if found
                             if playwright_result.get('deadline_info'):
                                 deadline = playwright_result['deadline_info']
                                 if deadline.get('date'):
                                     result['deadline_end'] = deadline['date']
+                                    notifier.notify_sync(ProgressStage.ANALYZING, f"📅 締切日: {deadline['date']}", "ページから締切日を抽出しました")
                             
-                            logging.info(f"[GRANT_FINDER] Playwright found {len(result.get('format_files', []))} format files")
+                            logging.info(f"[GRANT_FINDER] Playwright found {file_count} format files")
+                        else:
+                            notifier.notify_sync(ProgressStage.ANALYZING, "ℹ️ Playwright検証完了", "追加情報は見つかりませんでした")
                     except Exception as pw_error:
                         logging.warning(f"[GRANT_FINDER] Playwright verification failed: {pw_error}")
                         result['playwright_verified'] = False
