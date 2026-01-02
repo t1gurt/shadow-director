@@ -49,7 +49,7 @@ gcloud run deploy $SERVICE_NAME \
     --region $REGION \
     --platform managed \
     --allow-unauthenticated \
-    --memory 1Gi \
+    --memory 2Gi \
     --set-env-vars "APP_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=True,GCS_BUCKET_NAME=$GCS_BUCKET,DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN,USE_MEMORY_BANK=True"
 
 echo "------------------------------------------------"
