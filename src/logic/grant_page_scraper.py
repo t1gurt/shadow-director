@@ -24,17 +24,35 @@ class GrantPageScraper:
         '要項', '要綱', '様式', 'フォーマット'
     ]
     
-    # Keywords for format/application files
+    # Keywords for format/application files (A: 拡充版)
     FORMAT_FILE_KEYWORDS = [
-        '申請書', '応募書', '様式', 'フォーマット', 'テンプレート',
-        '書式', '記入例', '記載例', '申込書', '届出書',
-        'application', 'form', 'template', 'format'
+        # 申請書類系
+        '申請書', '応募書', '申込書', '届出書', '調書',
+        # 様式・フォーマット系
+        '様式', 'フォーマット', 'テンプレート', '書式', '雛形', 'ひな形',
+        # ダウンロード系
+        'ダウンロード', 'download', 'DL', '取得', '入手',
+        # ファイル種別系
+        'Word', 'Excel', 'PDF', 'ワード', 'エクセル',
+        # 記入系
+        '記入例', '記載例', '作成例', '見本',
+        # その他
+        'application', 'form', 'template', 'format',
+        '書類', '資料', '用紙', '別紙', '別記'
     ]
     
     # Keywords for deadline detection
     DEADLINE_KEYWORDS = [
         '締切', '締め切り', '期限', '期日', '終了',
         'deadline', '〆切', '必着', '消印有効'
+    ]
+    
+    # Keywords for navigation to file download pages (D: 複数ページ探索用)
+    DOWNLOAD_PAGE_KEYWORDS = [
+        '申請書類', '提出書類', '様式ダウンロード', '書類ダウンロード',
+        'ダウンロード', '申請様式', '申請方法', '応募方法',
+        '書類一覧', '必要書類', '提出資料', '申請に必要な書類',
+        '関連ファイル', '添付資料'
     ]
     
     def __init__(self, site_explorer=None):
@@ -95,12 +113,50 @@ class GrantPageScraper:
             # Extract all links
             all_links = await explorer.extract_links(page)
             
-            # Find format files
+            # Find format files from current page
             format_files = await self._find_format_files(all_links, page, grant_name)
+            
+            # Extract page text for analysis
+            page_text = await explorer.find_text_content(page)
+            
+            # (C) Text analysis: Look for download instructions in text
+            if len(format_files) == 0:
+                text_found_urls = self._extract_urls_from_text(page_text, all_links)
+                for url_info in text_found_urls:
+                    format_files.append(url_info)
+                self.logger.info(f"[GRANT_SCRAPER] Text analysis found {len(text_found_urls)} additional URLs")
+            
+            # (D) Multi-page exploration: Follow download-related links
+            if len(format_files) < 3:
+                download_pages = self._find_download_page_links(all_links)
+                self.logger.info(f"[GRANT_SCRAPER] Found {len(download_pages)} download page links to explore")
+                
+                for dl_link in download_pages[:3]:  # Explore up to 3 download pages
+                    dl_url = dl_link.get('href')
+                    if not dl_url:
+                        continue
+                    
+                    try:
+                        self.logger.info(f"[GRANT_SCRAPER] Exploring download page: {dl_url}")
+                        dl_page = await explorer.access_page(dl_url)
+                        if dl_page:
+                            dl_links = await explorer.extract_links(dl_page)
+                            dl_files = await self._find_format_files(dl_links, dl_page, grant_name)
+                            
+                            for f in dl_files:
+                                f['found_at'] = dl_url
+                                # Avoid duplicates
+                                if not any(existing.get('url') == f.get('url') for existing in format_files):
+                                    format_files.append(f)
+                            
+                            await dl_page.close()
+                            self.logger.info(f"[GRANT_SCRAPER] Found {len(dl_files)} files on download page")
+                    except Exception as dl_e:
+                        self.logger.warning(f"[GRANT_SCRAPER] Error exploring download page {dl_url}: {dl_e}")
+            
             result['format_files'] = format_files
             
             # Extract deadline information from page text
-            page_text = await explorer.find_text_content(page)
             deadline_info = self._extract_deadline(page_text)
             result['deadline_info'] = deadline_info
             
@@ -307,6 +363,112 @@ class GrantPageScraper:
         scored_links.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
         
         return scored_links
+    
+    def _find_download_page_links(self, links: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """
+        Find links that lead to download/application file pages (D: Multi-page exploration).
+        
+        Args:
+            links: List of link dictionaries
+            
+        Returns:
+            List of links to download pages, sorted by relevance
+        """
+        download_links = []
+        
+        for link in links:
+            if link.get('is_file'):
+                continue  # Skip direct file links
+            
+            href = link.get('href', '')
+            text = link.get('text', '')
+            
+            if not href or len(text) < 2:
+                continue
+            
+            combined = (href + ' ' + text).lower()
+            score = 0
+            
+            # Check for download page keywords
+            for keyword in self.DOWNLOAD_PAGE_KEYWORDS:
+                if keyword.lower() in combined:
+                    score += 15
+            
+            # Check for format file keywords in link text
+            for keyword in self.FORMAT_FILE_KEYWORDS:
+                if keyword.lower() in combined:
+                    score += 10
+            
+            if score > 0:
+                download_links.append({
+                    **link,
+                    'download_score': score
+                })
+        
+        download_links.sort(key=lambda x: x.get('download_score', 0), reverse=True)
+        return download_links
+    
+    def _extract_urls_from_text(self, text: str, existing_links: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """
+        Extract URLs mentioned in text that may not be clickable links (C: Text analysis).
+        Also finds references like "様式は○○からダウンロードしてください".
+        
+        Args:
+            text: Page text content
+            existing_links: Already found links to avoid duplicates
+            
+        Returns:
+            List of additional file URLs found in text
+        """
+        found_urls = []
+        existing_hrefs = {link.get('href', '') for link in existing_links}
+        
+        # Pattern 1: Direct URLs in text
+        url_pattern = r'https?://[^\s<>"\')\]]+\.(?:pdf|doc|docx|xls|xlsx|zip)'
+        url_matches = re.findall(url_pattern, text, re.IGNORECASE)
+        
+        for url in url_matches:
+            if url not in existing_hrefs:
+                found_urls.append({
+                    'url': url,
+                    'text': 'テキスト内URL',
+                    'filename': url.split('/')[-1],
+                    'file_type': self._get_file_type(url),
+                    'relevance_score': 5,
+                    'source': 'text_analysis'
+                })
+        
+        # Pattern 2: Look for download instructions mentioning file names
+        # e.g., "申請書様式（Word）をダウンロード"
+        instruction_patterns = [
+            r'(申請書|様式|フォーマット)[^。\n]{0,30}(ダウンロード|取得|入手)',
+            r'(ダウンロード|取得|入手)[^。\n]{0,30}(申請書|様式|フォーマット)',
+        ]
+        
+        has_download_instruction = False
+        for pattern in instruction_patterns:
+            if re.search(pattern, text):
+                has_download_instruction = True
+                break
+        
+        # If download instructions exist but no files found, log for debugging
+        if has_download_instruction and len(found_urls) == 0 and len(existing_links) == 0:
+            self.logger.info("[GRANT_SCRAPER] Download instructions found in text but no file URLs detected")
+        
+        return found_urls
+    
+    def _get_file_type(self, url: str) -> str:
+        """Get file type from URL."""
+        url_lower = url.lower()
+        if url_lower.endswith('.pdf'):
+            return 'pdf'
+        elif url_lower.endswith(('.doc', '.docx')):
+            return 'word'
+        elif url_lower.endswith(('.xls', '.xlsx')):
+            return 'excel'
+        elif url_lower.endswith('.zip'):
+            return 'zip'
+        return 'unknown'
     
     def _extract_deadline(self, text: str) -> Optional[Dict[str, Any]]:
         """
