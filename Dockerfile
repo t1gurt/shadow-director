@@ -6,6 +6,8 @@ FROM python:3.10-slim
 ENV PYTHONUNBUFFERED=1
 # APP_ENV: Defaults to production in Docker
 ENV APP_ENV=production
+# Playwright browser path (shared location)
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 
 # Set work directory
 WORKDIR /app
@@ -37,8 +39,10 @@ COPY . .
 # Install dependencies defined in pyproject.toml
 RUN pip install --no-cache-dir .
 
-# Install Playwright browsers (Chromium only for smaller image)
-RUN playwright install chromium
+# Install Playwright browsers to shared location (before user switch)
+RUN mkdir -p $PLAYWRIGHT_BROWSERS_PATH && \
+    playwright install chromium && \
+    chmod -R 755 $PLAYWRIGHT_BROWSERS_PATH
 
 # Create a non-root user and switch to it (Security Best Practice)
 RUN useradd -m appuser && chown -R appuser /app
