@@ -357,11 +357,16 @@ class Orchestrator:
         
         return interviewer_response
     
-    def _run_observer(self, user_id: str) -> str:
+    def _run_observer(self, user_id: str, message_callback=None) -> str:
         """
         Runs the Observer and formats the output with next scheduled run info.
         Auto-triggers Drafter for Strong Match opportunities (resonance score >= 70).
         Filters out previously shown grants.
+        
+        Args:
+            user_id: User/Channel ID
+            message_callback: Optional async callback function to send messages immediately
+                             Signature: async def callback(message: str, attachments: list = None)
         """
         from datetime import datetime, timedelta
         
@@ -394,27 +399,36 @@ class Orchestrator:
         
         print(f"[DEBUG] Found {len(opportunities)} total, {len(new_opportunities)} new, {len(strong_matches)} Strong Matches")
         
-        # Build result message
+        # Build result message - first send the search results
         result = observer_text
         
-        # Auto-trigger Drafter for Strong Matches
+        # Auto-trigger Drafter for Strong Matches - process sequentially
         if strong_matches:
-            result += "\n\n---\n\n【🎯 Strong Match検出！自動ドラフト生成開始】\n"
-            result += f"\n共鳴度70以上の案件が{len(strong_matches)}件見つかりました。スライドとドラフトを自動生成します...\n"
+            result += f"\n\n---\n\n【🎯 Strong Match検出！自動ドラフト生成開始】\n"
+            result += f"\n共鳴度70以上の案件が{len(strong_matches)}件見つかりました。\n"
+            result += "それぞれの助成金について順番に調査し、ドラフトを作成します...\n"
             
+            # Process each grant SEQUENTIALLY with immediate message sending
             for i, opp in enumerate(strong_matches, 1):
-                result += f"\n\n**{i}. {opp['title']} (共鳴度: {opp['resonance_score']})**\n"
+                grant_title = opp['title']
+                grant_result = f"\n\n---\n\n## 🔍 助成金 {i}/{len(strong_matches)}: {grant_title}\n"
+                grant_result += f"**(共鳴度: {opp['resonance_score']})**\n\n"
                 
-                # Generate slide image for grant
+                # Step 1: Generate slide image for grant
+                grant_result += "**Step 1: スライド生成中...**\n"
                 try:
-                    logging.info(f"[ORCH] Generating slide for: {opp['title']}")
+                    logging.info(f"[ORCH] Generating slide for: {grant_title}")
                     image_bytes, slide_filename = self.slide_generator.generate_grant_slide(opp)
                     if image_bytes:
                         gcs_path = self.slide_generator.save_to_gcs(image_bytes, user_id, slide_filename)
                         if gcs_path:
-                            result += f"📊 スライド生成完了\n[IMAGE_NEEDED:{user_id}:{slide_filename}]\n"
+                            grant_result += f"📊 スライド生成完了\n[IMAGE_NEEDED:{user_id}:{slide_filename}]\n"
                 except Exception as e:
                     logging.error(f"[ORCH] Slide generation failed: {e}")
+                    grant_result += f"⚠️ スライド生成スキップ\n"
+                
+                # Step 2: Create draft for this grant
+                grant_result += "\n**Step 2: ドラフト作成中...**\n"
                 
                 # Format grant information for Drafter
                 grant_info = f"""助成金名: {opp['title']}
@@ -425,29 +439,45 @@ URL: {opp.get('official_url', 'N/A')}
 
 この助成金の申請書ドラフトを作成してください。"""
                 
-                # Auto-trigger Drafter
                 try:
-                    logging.info(f"[ORCH] Auto-triggering Drafter for: {opp['title']}")
+                    logging.info(f"[ORCH] Auto-triggering Drafter for: {grant_title}")
                     message, content, filename, format_files = self.drafter.create_draft(user_id, grant_info)
                     
                     # Add format file markers if any
                     if format_files:
-                        result += "📎 申請フォーマットファイル:\n"
+                        grant_result += "📎 申請フォーマットファイル:\n"
                         for file_path, file_name in format_files:
-                            result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+                            grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
                     else:
-                        # Notify user that no format files were found
-                        result += "ℹ️ 申請フォーマットファイルは見つかりませんでした。\n"
+                        grant_result += "ℹ️ 申請フォーマットファイルは見つかりませんでした。\n"
                     
                     if content:
-                        # Success: add concise message with attachment marker
-                        result += f"✅ ドラフト作成完了\n[ATTACHMENT_NEEDED:{user_id}:{filename}]\n"
+                        grant_result += f"✅ ドラフト作成完了\n[ATTACHMENT_NEEDED:{user_id}:{filename}]\n"
                     else:
-                        # Error occurred
-                        result += f"⚠️ ドラフト作成エラー: {message}\n"
+                        grant_result += f"⚠️ ドラフト作成エラー: {message}\n"
                 except Exception as e:
-                    logging.error(f"[ORCH] Drafter auto-trigger failed for {opp['title']}: {e}")
-                    result += f"⚠️ ドラフト作成エラー: {str(e)}\n"
+                    logging.error(f"[ORCH] Drafter auto-trigger failed for {grant_title}: {e}")
+                    grant_result += f"⚠️ ドラフト作成エラー: {str(e)}\n"
+                
+                grant_result += f"\n✨ **{grant_title}** の処理完了\n"
+                
+                # Immediately send this grant's result to Discord via callback
+                if message_callback:
+                    try:
+                        import asyncio
+                        # If callback is async, run it
+                        if asyncio.iscoroutinefunction(message_callback):
+                            asyncio.create_task(message_callback(grant_result))
+                        else:
+                            message_callback(grant_result)
+                    except Exception as e:
+                        logging.error(f"[ORCH] Message callback failed: {e}")
+                        # Fall back to accumulating result
+                        result += grant_result
+                else:
+                    # No callback, accumulate results
+                    result += grant_result
+                    
         else:
             result += "\n\n💡 今回は共鳴度70以上の Strong Match は見つかりませんでした。"
         
