@@ -277,18 +277,35 @@ class GrantPageScraper:
         """
         format_files = []
         
+        # Keywords that indicate a file download link (even without file extension in URL)
+        FILE_INDICATOR_KEYWORDS = [
+            'word', 'excel', 'pdf', 'ワード', 'エクセル',
+            '申請書', '様式', 'ダウンロード', 'download', '.doc', '.xls', '.pdf'
+        ]
+        
         for link in links:
-            if not link.get('is_file'):
-                continue
-            
             href = link.get('href', '')
             text = link.get('text', '')
+            is_file = link.get('is_file', False)
+            
+            # Check if this looks like a file link (by extension OR by keywords in text)
+            text_lower = text.lower()
+            is_likely_file = is_file
+            
+            # Also check link text for file-related keywords
+            if not is_likely_file:
+                for indicator in FILE_INDICATOR_KEYWORDS:
+                    if indicator in text_lower or indicator in href.lower():
+                        is_likely_file = True
+                        break
+            
+            if not is_likely_file:
+                continue
             
             # Score relevance
             score = 0
             
-            # Check link text for format keywords
-            text_lower = text.lower()
+            # Check link text for format keywords (text_lower already defined above)
             for keyword in self.FORMAT_FILE_KEYWORDS:
                 if keyword.lower() in text_lower:
                     score += 10
