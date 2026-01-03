@@ -51,7 +51,7 @@ gcloud run deploy $SERVICE_NAME \
     --platform managed \
     --allow-unauthenticated \
     --memory 2Gi \
-    --set-env-vars "APP_ENV=production,GCP_PROJECT=$PROJECT_ID,GCP_LOCATION=$REGION,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=True,GCS_BUCKET_NAME=$GCS_BUCKET,DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN,USE_MEMORY_BANK=True"
+    --set-env-vars "APP_ENV=production,GCP_PROJECT=$PROJECT_ID,GCP_LOCATION=global,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=True,GCS_BUCKET_NAME=$GCS_BUCKET,DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN,USE_MEMORY_BANK=True"
 
 echo "------------------------------------------------"
 echo "Step 3: Configuring Service Account Permissions..."

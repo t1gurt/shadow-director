@@ -1,10 +1,11 @@
 model_config:
   project_id: "zenn-shadow-director"
-  interviewer_model: "gemini-2.0-flash" 
-  observer_model: "gemini-2.0-flash"
-  router_model: "gemini-2.0-flash"
-  slide_generator_model: "gemini-2.0-flash"
-  location: "us-central1"
+  # Gemini 3.0 Pro Preview - requires global location
+  interviewer_model: "gemini-3-pro-preview" 
+  observer_model: "gemini-3-pro-preview"
+  router_model: "gemini-3-pro-preview"
+  slide_generator_model: "gemini-3-pro-preview"
+  location: "global"
 
 system_prompts:
   interviewer: |

@@ -16,7 +16,7 @@ def create_gemini_client():
     
     Environment variables:
         GCP_PROJECT or GOOGLE_CLOUD_PROJECT: GCP project ID
-        GCP_LOCATION: GCP location (default: us-central1)
+        GCP_LOCATION: GCP location (default: global for Gemini 3.0)
     
     Returns:
         genai.Client instance or None if initialization fails
@@ -27,7 +27,8 @@ def create_gemini_client():
         
         # Get project and location from environment
         project = os.environ.get("GCP_PROJECT", os.environ.get("GOOGLE_CLOUD_PROJECT", ""))
-        location = os.environ.get("GCP_LOCATION", "us-central1")
+        # Gemini 3.0 Pro Preview requires 'global' location
+        location = os.environ.get("GCP_LOCATION", "global")
         
         if not project:
             logging.warning("[GEMINI_CLIENT] GCP_PROJECT not set, attempting auto-detection")
