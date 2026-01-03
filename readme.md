@@ -100,12 +100,29 @@ graph TD
         Orchestrator -->|Route: INTERVIEW| Interviewer[Interviewer Agent]
         Orchestrator -->|Route: OBSERVE| Observer[Observer Agent]
         Orchestrator -->|Route: DRAFT| Drafter[Drafter Agent]
+        Orchestrator -->|Route: PR| PRAgent[PR Agent]
         
-        Interviewer -->|Deep Reasoning| GeminiPro[Gemini 3.0 Pro]
-        Observer -->|Fast + Search| GeminiFlash[Gemini 3.0 Flash]
-        Drafter -->|Document Gen| GeminiPro
+        subgraph "Vertex AI Backend"
+            GeminiClient[Gemini Client Factory]
+            GeminiClient -->|vertexai=True| VertexAI[Vertex AI API]
+            VertexAI --> GeminiPro[Gemini 3.0 Pro]
+            VertexAI --> GeminiFlash[Gemini 3.0 Flash]
+        end
+        
+        Interviewer --> GeminiClient
+        Observer --> GeminiClient
+        Drafter --> GeminiClient
+        PRAgent --> GeminiClient
         
         GeminiFlash -->|Grounding| GoogleSearch[Google Search]
+    end
+
+    subgraph "SGNA Model (Search-Ground-Navigate-Act)"
+        Observer -->|Search| GrantFinder[Grant Finder]
+        GrantFinder -->|Navigate| Playwright[Playwright Browser]
+        Playwright -->|Act| PageScraper[Grant Page Scraper]
+        PageScraper -->|Validate| FileValidator[File Validator]
+        PageScraper -.->|Fallback| VisualAnalyzer[Visual Analyzer]
     end
 
     subgraph "Storage Layer"
