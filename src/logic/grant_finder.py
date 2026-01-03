@@ -2,7 +2,7 @@ import re
 import logging
 import asyncio
 from typing import List, Dict, Any, Optional
-from google.genai.types import GenerateContentConfig
+from google.genai.types import GenerateContentConfig, ThinkingConfig
 from src.tools.search_tool import SearchTool
 from src.logic.grant_validator import GrantValidator
 from src.logic.grant_page_scraper import GrantPageScraper
@@ -162,11 +162,15 @@ class GrantFinder:
             # Enable Google Search Tool
             tool_config = self.search_tool.get_tool_config()
             
+            # Gemini 3.0 Thinking Mode for grant discovery
+            thinking_config = ThinkingConfig(thinking_level="high")
+            
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=full_prompt,
                 config=GenerateContentConfig(
-                    tools=[tool_config]
+                    tools=[tool_config],
+                    thinking_config=thinking_config
                 )
             )
             response_text = response.text
@@ -274,12 +278,16 @@ class GrantFinder:
         try:
             tool_config = self.search_tool.get_tool_config()
             
+            # Gemini 3.0 Thinking Mode for deep reasoning during page investigation
+            thinking_config = ThinkingConfig(thinking_level="high")
+            
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=full_prompt,
                 config=GenerateContentConfig(
                     tools=[tool_config],
-                    temperature=0.2
+                    temperature=0.2,
+                    thinking_config=thinking_config
                 )
             )
             
@@ -488,12 +496,16 @@ class GrantFinder:
 - **公式URL**: [正確なURL]
 """
             try:
+                # Gemini 3.0 Thinking Mode for retry search
+                thinking_config = ThinkingConfig(thinking_level="high")
+                
                 response = self.client.models.generate_content(
                     model=self.model_name,
                     contents=retry_prompt,
                     config=GenerateContentConfig(
                         tools=[self.search_tool.get_tool_config()],
-                        temperature=0.1
+                        temperature=0.1,
+                        thinking_config=thinking_config
                     )
                 )
                 
