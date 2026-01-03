@@ -10,6 +10,7 @@ __update_date__ = "2026-01-03"
 # 最新の追加機能リスト
 LATEST_FEATURES = [
     # v1.3.0 - SGNAモデル実装
+    "ビジュアル推論フォールバック（DOM解析困難時のスクリーンショット分析）",
     "Gemini 3.0 Thinking Mode（thinking_level=high）による深層推論",
     "SGNAモデル（Search-Ground-Navigate-Act）による助成金検索精度向上",
     "信頼ドメイン制限（go.jp/or.jp/lg.jp/co.jp/org/com）による検索最適化",

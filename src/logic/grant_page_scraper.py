@@ -64,15 +64,25 @@ class GrantPageScraper:
     # Debug configuration
     DEBUG_SCREENSHOT_DIR = '/tmp/grant_scraper_debug'
     
-    def __init__(self, site_explorer=None):
+    def __init__(self, site_explorer=None, gemini_client=None, model_name: str = "gemini-3.0-pro"):
         """
         Initialize GrantPageScraper.
         
         Args:
             site_explorer: SiteExplorer instance (will be created if not provided)
+            gemini_client: Gemini API client for visual reasoning fallback
+            model_name: Gemini model name for visual analysis
         """
         self.site_explorer = site_explorer
+        self.gemini_client = gemini_client
+        self.model_name = model_name
+        self.visual_analyzer = None
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize visual analyzer if client provided
+        if gemini_client:
+            from src.logic.visual_analyzer import VisualAnalyzer
+            self.visual_analyzer = VisualAnalyzer(gemini_client, model_name)
     
     async def find_grant_info(self, url: str, grant_name: str = None) -> Dict[str, Any]:
         """
@@ -748,3 +758,128 @@ class GrantPageScraper:
                 continue
         
         return None
+    
+    # ====== Visual Reasoning Fallback Methods ======
+    
+    async def find_files_visually(
+        self, 
+        page: Any,
+        explorer: Any = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Find download files using visual analysis when DOM-based search fails.
+        Fallback method using Gemini 3.0 multimodal capabilities.
+        
+        Args:
+            page: Playwright page object
+            explorer: SiteExplorer instance (optional)
+            
+        Returns:
+            List of found download elements
+        """
+        if not self.visual_analyzer:
+            self.logger.warning("[GRANT_SCRAPER] Visual analyzer not available (no Gemini client)")
+            return []
+        
+        self.logger.info("[GRANT_SCRAPER] Attempting visual analysis fallback for file detection")
+        
+        try:
+            elements = await self.visual_analyzer.find_download_elements_visually(page, explorer)
+            
+            if elements:
+                self.logger.info(f"[GRANT_SCRAPER] Visual analysis found {len(elements)} download elements")
+            else:
+                self.logger.info("[GRANT_SCRAPER] Visual analysis did not find any download elements")
+            
+            return elements
+            
+        except Exception as e:
+            self.logger.error(f"[GRANT_SCRAPER] Visual analysis failed: {e}")
+            return []
+    
+    async def verify_page_visually(self, page: Any) -> Dict[str, Any]:
+        """
+        Verify page type using visual analysis when DOM-based checks are unreliable.
+        Fallback method using Gemini 3.0 multimodal capabilities.
+        
+        Args:
+            page: Playwright page object
+            
+        Returns:
+            Page verification result with type and confidence
+        """
+        if not self.visual_analyzer:
+            self.logger.warning("[GRANT_SCRAPER] Visual analyzer not available (no Gemini client)")
+            return {"success": False, "reason": "Visual analyzer not configured"}
+        
+        self.logger.info("[GRANT_SCRAPER] Attempting visual page verification")
+        
+        try:
+            result = await self.visual_analyzer.verify_page_type(page)
+            
+            if result.get("success"):
+                page_type = result.get("ページ種類", "Unknown")
+                confidence = result.get("信頼度", "Unknown")
+                self.logger.info(f"[GRANT_SCRAPER] Visual verification: {page_type} (confidence: {confidence})")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"[GRANT_SCRAPER] Visual page verification failed: {e}")
+            return {"success": False, "reason": str(e)}
+    
+    async def analyze_with_visual_fallback(
+        self,
+        page: Any,
+        explorer: Any,
+        dom_files: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Analyze page with visual fallback if DOM-based analysis finds few files.
+        Combines DOM and visual analysis for best results.
+        
+        Args:
+            page: Playwright page object
+            explorer: SiteExplorer instance
+            dom_files: Files found by DOM-based analysis
+            
+        Returns:
+            Combined list of found files (DOM + visual)
+        """
+        # If DOM analysis found sufficient files, return as-is
+        if len(dom_files) >= 3:
+            self.logger.info(f"[GRANT_SCRAPER] DOM analysis found {len(dom_files)} files, skipping visual fallback")
+            return dom_files
+        
+        # Try visual fallback if DOM found few or no files
+        if self.visual_analyzer:
+            self.logger.info("[GRANT_SCRAPER] DOM analysis found few files, trying visual fallback")
+            
+            visual_elements = await self.find_files_visually(page, explorer)
+            
+            # If visual found elements with coordinates, attempt to extract URLs
+            for element in visual_elements:
+                if element.get("coordinates"):
+                    try:
+                        # Click at coordinates to potentially reveal download link
+                        coords = element["coordinates"]
+                        self.logger.info(f"[GRANT_SCRAPER] Visual element found at ({coords['x']}, {coords['y']})")
+                        
+                        # Note: Actual coordinate clicking would be:
+                        # await page.mouse.click(coords['x'], coords['y'])
+                        # For safety, we just log the finding for now
+                        
+                    except Exception as e:
+                        self.logger.warning(f"[GRANT_SCRAPER] Failed to process visual element: {e}")
+            
+            # Merge results (DOM files + visual findings as metadata)
+            if visual_elements:
+                dom_files.append({
+                    "type": "visual_analysis",
+                    "text": "ビジュアル分析で検出された要素あり",
+                    "elements": visual_elements,
+                    "note": "座標クリックによる取得が必要"
+                })
+        
+        return dom_files
+
