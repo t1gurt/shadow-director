@@ -411,6 +411,7 @@ class Orchestrator:
             # Process each grant SEQUENTIALLY with immediate message sending
             for i, opp in enumerate(strong_matches, 1):
                 grant_title = opp['title']
+                grant_url = opp.get('official_url', 'N/A')
                 grant_result = f"\n\n---\n\n## 🔍 助成金 {i}/{len(strong_matches)}: {grant_title}\n"
                 grant_result += f"**(共鳴度: {opp['resonance_score']})**\n\n"
                 
@@ -427,28 +428,60 @@ class Orchestrator:
                     logging.error(f"[ORCH] Slide generation failed: {e}")
                     grant_result += f"⚠️ スライド生成スキップ\n"
                 
-                # Step 2: Create draft for this grant
-                grant_result += "\n**Step 2: ドラフト作成中...**\n"
+                # Step 2: Get detailed grant information
+                grant_result += "\n**Step 2: 助成金詳細を調査中...**\n"
+                grant_details = ""
+                format_files = []
+                try:
+                    logging.info(f"[ORCH] Getting details for: {grant_title}")
+                    # Use Drafter's research function to get grant format info
+                    grant_details, format_files = self.drafter._research_grant_format(
+                        grant_title, user_id, grant_url=grant_url
+                    )
+                    
+                    if grant_details:
+                        # Summarize the key details
+                        grant_result += f"📋 詳細取得完了\n"
+                        # Add key info from details (truncated for display)
+                        detail_summary = grant_details[:500] + "..." if len(grant_details) > 500 else grant_details
+                        grant_result += f"\n```\n{detail_summary}\n```\n"
+                    else:
+                        grant_result += "ℹ️ 詳細情報は基本情報のみ\n"
+                except Exception as e:
+                    logging.error(f"[ORCH] Grant details fetch failed: {e}")
+                    grant_result += f"⚠️ 詳細取得スキップ（基本情報で続行）\n"
                 
-                # Format grant information for Drafter
+                # Add format file markers if found during research
+                if format_files:
+                    grant_result += "📎 申請フォーマットファイル:\n"
+                    for file_path, file_name in format_files:
+                        grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+                
+                # Step 3: Create draft for this grant using collected information
+                grant_result += "\n**Step 3: ドラフト作成中...**\n"
+                
+                # Format grant information for Drafter with detailed info
                 grant_info = f"""助成金名: {opp['title']}
-URL: {opp.get('official_url', 'N/A')}
+URL: {grant_url}
 金額: {opp.get('amount', 'N/A')}
 締切: {opp.get('deadline_end', 'N/A')}
 共鳴理由: {opp['reason']}
+
+【詳細情報】
+{grant_details if grant_details else '詳細情報なし'}
 
 この助成金の申請書ドラフトを作成してください。"""
                 
                 try:
                     logging.info(f"[ORCH] Auto-triggering Drafter for: {grant_title}")
-                    message, content, filename, format_files = self.drafter.create_draft(user_id, grant_info)
+                    message, content, filename, draft_format_files = self.drafter.create_draft(user_id, grant_info)
                     
-                    # Add format file markers if any
-                    if format_files:
+                    # Add any additional format files found during draft creation
+                    if draft_format_files and not format_files:
                         grant_result += "📎 申請フォーマットファイル:\n"
-                        for file_path, file_name in format_files:
+                        for file_path, file_name in draft_format_files:
                             grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
-                    else:
+                    elif not format_files and not draft_format_files:
                         grant_result += "ℹ️ 申請フォーマットファイルは見つかりませんでした。\n"
                     
                     if content:
