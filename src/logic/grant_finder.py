@@ -12,7 +12,19 @@ class GrantFinder:
     """
     Handles grant search operations including query generation and official page lookup.
     Uses Playwright-based GrantPageScraper for enhanced page verification.
+    Implements SGNA (Search-Ground-Navigate-Act) model for improved accuracy.
     """
+    
+    # Trusted domains for grant information (SGNA model: Site Restrictions)
+    TRUSTED_DOMAINS = [
+        'go.jp',      # 政府機関
+        'or.jp',      # 財団法人・NPO
+        'lg.jp',      # 地方自治体
+        'ac.jp',      # 学術機関
+        'org',        # 非営利組織
+        'co.jp',      # 企業（CSR助成金）
+        'com',        # 国際企業
+    ]
     
     def __init__(self, client, model_name: str, config: Dict[str, Any]):
         self.client = client
@@ -195,20 +207,44 @@ class GrantFinder:
         # Build improved search prompt
         prompt_template = self.config.get("system_prompts", {}).get("observer_find_official_page", "")
         
-        # Create a more targeted search query
+        # Extract current year from current_date for search optimization
+        current_year = "2026"
+        if current_date:
+            year_match = re.search(r'(\d{4})', current_date)
+            if year_match:
+                current_year = year_match.group(1)
+        
+        # Build site restriction string for trusted domains (SGNA model)
+        site_restriction = " OR ".join([f"site:{d}" for d in self.TRUSTED_DOMAINS])
+        
+        # Create a more targeted search query with SGNA model enhancements
         if org_name:
             search_hint = f"""
-**検索戦略（重要）:**
-以下の順序で検索してください：
-1. 「{org_name} 助成金 募集 2025」または「{org_name} 助成金 募集 2026」
-2. 「{org_name} 公式サイト 助成」
-3. 組織の公式サイト内で助成金情報ページを探す
+**検索戦略（SGNAモデル - 重要）:**
 
-**注意:** 助成金名「{grant_name}」で直接検索すると古いページや関連ページがヒットしやすいため、
+**Step 1: 信頼できるドメインから検索**
+検索クエリに以下のサイト制限を含めてください：
+`"{org_name} 助成金 募集 {current_year}" ({site_restriction})`
+
+**Step 2: 着陸ページ優先**
+- PDFへの直接リンクではなく、HTMLの「公募要領ページ」を探してください
+- 直リンクはリンク切れリスクが高く、最新版かどうかの判断が困難です
+
+**Step 3: 最新情報の確認**
+- 「{current_year}年度」「第○回」「令和○年」などの表記を確認
+- 古い年度のページを避けてください
+
+**注意:** 助成金名「{grant_name}」で直接検索すると古いページがヒットしやすいため、
 まず組織の助成金ポータルページを見つけ、そこから該当プログラムを特定してください。
 """
         else:
-            search_hint = ""
+            search_hint = f"""
+**検索戦略（SGNAモデル）:**
+助成金「{grant_name}」の公式ページを以下の条件で検索してください：
+- 信頼できるドメイン: {site_restriction}
+- 年度: {current_year}年度または最新の公募
+- HTMLページを優先（PDFへの直リンクより着陸ページを優先）
+"""
         
         if prompt_template:
             full_prompt = prompt_template.format(
@@ -433,17 +469,20 @@ class GrantFinder:
             notifier.notify_sync(ProgressStage.SEARCHING, f"代替検索 ({retry_num + 1}/{max_retries})", f"検索: {query[:40]}...")
             logging.info(f"[GRANT_FINDER] Retry {retry_num + 1}: searching with '{query}'")
             
+            # Build site restriction for retry (SGNA model)
+            site_restriction = " OR ".join([f"site:{d}" for d in self.TRUSTED_DOMAINS])
+            
             retry_prompt = f"""
 助成金の公式申請ページを検索してください。
 
-**検索クエリ:** {query}
+**検索クエリ（SGNAモデル）:** `"{query}" ({site_restriction})`
 
 **探している助成金:** {grant_name}
 
 **重要条件:**
-1. 財団・企業・行政の**公式サイトのみ**
-2. 実際にアクセス可能なページ
-3. .or.jp, .go.jp, .org, .co.jp など公式ドメイン
+1. 信頼できるドメインのみ: go.jp, or.jp, lg.jp, co.jp, org, com
+2. **着陸ページ優先**: PDFへの直リンクではなく、HTMLの公募ページを選択
+3. 最新の公募情報であること（年度を確認）
 
 **出力形式:**
 - **公式URL**: [正確なURL]
