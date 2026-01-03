@@ -55,6 +55,15 @@ class GrantPageScraper:
         '関連ファイル', '添付資料'
     ]
     
+    # SGNA Phase 5: Popup close keywords for auto-dismissal
+    POPUP_CLOSE_KEYWORDS = [
+        '閉じる', 'close', '×', 'キャンセル', 'cancel',
+        'いいえ', 'no', 'skip', 'スキップ', '後で', 'later'
+    ]
+    
+    # Debug configuration
+    DEBUG_SCREENSHOT_DIR = '/tmp/grant_scraper_debug'
+    
     def __init__(self, site_explorer=None):
         """
         Initialize GrantPageScraper.
@@ -614,3 +623,128 @@ class GrantPageScraper:
                 result['reasons'].append(f'検証エラー: {str(e)}')
         
         return result
+    
+    # ====== SGNA Phase 5: Error Handling Methods ======
+    
+    async def dismiss_popups(self, page: Any, max_attempts: int = 3) -> bool:
+        """
+        Attempt to dismiss popups/overlays that may block content (SGNA Phase 5).
+        
+        Args:
+            page: Playwright page object
+            max_attempts: Maximum dismiss attempts
+            
+        Returns:
+            True if any popup was dismissed
+        """
+        dismissed = False
+        
+        for attempt in range(max_attempts):
+            try:
+                # Find and click close buttons using keywords
+                for keyword in self.POPUP_CLOSE_KEYWORDS:
+                    try:
+                        # Try to find button/link with matching text
+                        selector = f'button:has-text("{keyword}"), a:has-text("{keyword}"), [aria-label*="{keyword}"]'
+                        element = await page.query_selector(selector)
+                        
+                        if element:
+                            await element.click()
+                            self.logger.info(f"[GRANT_SCRAPER] Dismissed popup with '{keyword}'")
+                            dismissed = True
+                            await page.wait_for_timeout(500)  # Wait for animation
+                            break
+                    except:
+                        continue
+                
+                # Try clicking overlay backgrounds to dismiss
+                try:
+                    overlay = await page.query_selector('.modal-backdrop, .overlay, [class*="modal-bg"]')
+                    if overlay:
+                        await overlay.click()
+                        dismissed = True
+                except:
+                    pass
+                    
+            except Exception as e:
+                self.logger.warning(f"[GRANT_SCRAPER] Popup dismiss attempt {attempt + 1} failed: {e}")
+        
+        return dismissed
+    
+    async def take_debug_screenshot(self, page: Any, name: str = "debug") -> Optional[str]:
+        """
+        Take a debug screenshot for error analysis (SGNA Phase 5).
+        
+        Args:
+            page: Playwright page object
+            name: Name for the screenshot
+            
+        Returns:
+            Path to screenshot or None
+        """
+        import os
+        from datetime import datetime
+        
+        try:
+            # Ensure debug directory exists
+            os.makedirs(self.DEBUG_SCREENSHOT_DIR, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(self.DEBUG_SCREENSHOT_DIR, f"{name}_{timestamp}.png")
+            
+            await page.screenshot(path=path, full_page=True)
+            self.logger.info(f"[GRANT_SCRAPER] Debug screenshot saved: {path}")
+            return path
+            
+        except Exception as e:
+            self.logger.error(f"[GRANT_SCRAPER] Failed to take debug screenshot: {e}")
+            return None
+    
+    async def try_alternative_links(
+        self, 
+        page: Any, 
+        explorer: Any,
+        failed_url: str,
+        alternative_links: List[Dict[str, str]]
+    ) -> Optional[str]:
+        """
+        Try alternative URLs when a link fails (SGNA Phase 5 error recovery).
+        
+        Args:
+            page: Current page (will be closed)
+            explorer: SiteExplorer instance
+            failed_url: URL that failed
+            alternative_links: List of alternative links to try
+            
+        Returns:
+            Working URL or None
+        """
+        self.logger.info(f"[GRANT_SCRAPER] Trying {len(alternative_links)} alternative links")
+        
+        for link in alternative_links[:5]:  # Try up to 5 alternatives
+            alt_url = link.get('href')
+            if not alt_url or alt_url == failed_url:
+                continue
+            
+            try:
+                alt_page = await explorer.access_page(alt_url)
+                if alt_page:
+                    info = await explorer.get_page_info(alt_page)
+                    title = info.get('title', '').lower()
+                    
+                    # Check if it's not an error page
+                    error_indicators = ['404', 'not found', 'エラー']
+                    is_error = any(ind in title for ind in error_indicators)
+                    
+                    if not is_error:
+                        self.logger.info(f"[GRANT_SCRAPER] Found working alternative: {alt_url}")
+                        await alt_page.close()
+                        return alt_url
+                    
+                    await alt_page.close()
+                    
+            except Exception as e:
+                self.logger.warning(f"[GRANT_SCRAPER] Alternative link failed: {alt_url}: {e}")
+                continue
+        
+        return None

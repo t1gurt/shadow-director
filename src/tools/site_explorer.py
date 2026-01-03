@@ -75,13 +75,30 @@ class SiteExplorer:
         except Exception as e:
             self.logger.error(f"[SITE_EXPLORER] Error closing browser: {e}")
     
-    async def access_page(self, url: str, wait_for_load: bool = True) -> Optional[Any]:
+    def _is_government_site(self, url: str) -> bool:
+        """Check if URL is a government/public site requiring rate limiting."""
+        gov_domains = ['go.jp', 'lg.jp', 'or.jp', 'ac.jp']
+        try:
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc.lower()
+            return any(domain.endswith(d) for d in gov_domains)
+        except:
+            return False
+    
+    async def access_page(
+        self, 
+        url: str, 
+        wait_for_load: bool = True,
+        use_progressive_wait: bool = True
+    ) -> Optional[Any]:
         """
         Access a webpage and return the page object.
+        Implements SGNA model: Progressive Wait and Rate Limiting.
         
         Args:
             url: URL to access
             wait_for_load: Whether to wait for page load
+            use_progressive_wait: Use progressive wait strategy (SGNA model)
             
         Returns:
             Playwright page object or None if failed
@@ -91,13 +108,34 @@ class SiteExplorer:
             return None
         
         try:
+            # Rate Limiting for government/public sites (SGNA model)
+            if self._is_government_site(url):
+                self.logger.info(f"[SITE_EXPLORER] Rate limiting: 1s delay for gov site")
+                await asyncio.sleep(1.0)
+            
             page = await self.context.new_page()
             page.set_default_timeout(self.timeout)
             
             self.logger.info(f"[SITE_EXPLORER] Accessing: {url}")
             
             if wait_for_load:
-                await page.goto(url, wait_until='domcontentloaded')
+                if use_progressive_wait:
+                    # Progressive Wait Strategy (SGNA model)
+                    # Step 1: Try networkidle for dynamic content
+                    try:
+                        await page.goto(url, wait_until='networkidle', timeout=self.timeout)
+                        self.logger.info(f"[SITE_EXPLORER] Loaded with networkidle")
+                    except Exception as wait_error:
+                        # Step 2: Fall back to domcontentloaded if networkidle fails
+                        self.logger.warning(f"[SITE_EXPLORER] networkidle failed, trying domcontentloaded")
+                        try:
+                            await page.goto(url, wait_until='domcontentloaded', timeout=self.timeout)
+                        except Exception as dom_error:
+                            # Step 3: Last resort - basic load
+                            self.logger.warning(f"[SITE_EXPLORER] domcontentloaded failed, using load")
+                            await page.goto(url, wait_until='load', timeout=self.timeout)
+                else:
+                    await page.goto(url, wait_until='domcontentloaded')
             else:
                 await page.goto(url)
             
@@ -284,6 +322,157 @@ class SiteExplorer:
         except Exception as e:
             self.logger.error(f"[SITE_EXPLORER] Failed to take screenshot: {e}")
             return False
+    
+    # ====== SGNA Phase 3: Accessibility Tree Methods ======
+    
+    async def extract_accessibility_tree(self, page: Any, max_depth: int = 5) -> Dict[str, Any]:
+        """
+        Extract accessibility tree from page for semantic analysis (SGNA model).
+        This provides a structured view of the page content without relying on CSS selectors.
+        
+        Args:
+            page: Playwright page object
+            max_depth: Maximum depth of tree to extract
+            
+        Returns:
+            Dictionary with semantic structure (headings, links, buttons)
+        """
+        try:
+            # Extract semantic elements using JavaScript
+            accessibility_data = await page.evaluate('''
+                () => {
+                    const result = {
+                        headings: [],
+                        links: [],
+                        buttons: [],
+                        forms: []
+                    };
+                    
+                    // Extract all headings (H1-H6)
+                    document.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach((el, idx) => {
+                        result.headings.push({
+                            level: parseInt(el.tagName[1]),
+                            text: el.innerText.trim().substring(0, 200),
+                            index: idx
+                        });
+                    });
+                    
+                    // Extract links with context
+                    document.querySelectorAll('a[href]').forEach((el, idx) => {
+                        if (idx < 100) {  // Limit to 100 links
+                            result.links.push({
+                                text: el.innerText.trim().substring(0, 100),
+                                href: el.href,
+                                ariaLabel: el.getAttribute('aria-label') || '',
+                                index: idx
+                            });
+                        }
+                    });
+                    
+                    // Extract buttons
+                    document.querySelectorAll('button, input[type="submit"], input[type="button"]').forEach((el, idx) => {
+                        if (idx < 20) {
+                            result.buttons.push({
+                                text: el.innerText || el.value || '',
+                                type: el.type || 'button',
+                                index: idx
+                            });
+                        }
+                    });
+                    
+                    return result;
+                }
+            ''')
+            
+            self.logger.info(f"[SITE_EXPLORER] Extracted accessibility tree: {len(accessibility_data.get('headings', []))} headings, {len(accessibility_data.get('links', []))} links")
+            return accessibility_data
+            
+        except Exception as e:
+            self.logger.error(f"[SITE_EXPLORER] Error extracting accessibility tree: {e}")
+            return {'headings': [], 'links': [], 'buttons': [], 'forms': []}
+    
+    async def find_heading_sections(self, page: Any) -> List[Dict[str, Any]]:
+        """
+        Find and structure page sections by headings (SGNA model).
+        Useful for navigating complex government pages with hierarchical structure.
+        
+        Args:
+            page: Playwright page object
+            
+        Returns:
+            List of heading sections with their child content
+        """
+        try:
+            accessibility = await self.extract_accessibility_tree(page)
+            headings = accessibility.get('headings', [])
+            
+            # Build hierarchical structure
+            sections = []
+            current_section = None
+            
+            for heading in headings:
+                section = {
+                    'level': heading['level'],
+                    'title': heading['text'],
+                    'index': heading['index']
+                }
+                sections.append(section)
+            
+            return sections
+            
+        except Exception as e:
+            self.logger.error(f"[SITE_EXPLORER] Error finding heading sections: {e}")
+            return []
+    
+    async def find_links_by_text(
+        self, 
+        page: Any, 
+        keywords: List[str],
+        case_sensitive: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Find links by text content matching keywords (SGNA model semantic search).
+        More robust than CSS selector-based search.
+        
+        Args:
+            page: Playwright page object
+            keywords: List of keywords to search for
+            case_sensitive: Whether to match case
+            
+        Returns:
+            List of matching links
+        """
+        try:
+            accessibility = await self.extract_accessibility_tree(page)
+            links = accessibility.get('links', [])
+            
+            matching_links = []
+            for link in links:
+                link_text = link.get('text', '')
+                aria_label = link.get('ariaLabel', '')
+                combined_text = f"{link_text} {aria_label}"
+                
+                if not case_sensitive:
+                    combined_text = combined_text.lower()
+                    search_keywords = [k.lower() for k in keywords]
+                else:
+                    search_keywords = keywords
+                
+                # Check if any keyword matches
+                for keyword in search_keywords:
+                    if keyword in combined_text:
+                        matching_links.append({
+                            **link,
+                            'matched_keyword': keyword
+                        })
+                        break
+            
+            self.logger.info(f"[SITE_EXPLORER] Found {len(matching_links)} links matching keywords")
+            return matching_links
+            
+        except Exception as e:
+            self.logger.error(f"[SITE_EXPLORER] Error finding links by text: {e}")
+            return []
 
 
 def run_sync(coro):
