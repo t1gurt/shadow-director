@@ -4,21 +4,30 @@ Shadow Director Version Information
 """
 
 # バージョン情報
-__version__ = "1.2.0"
-__update_date__ = "2026-01-02"
+__version__ = "1.3.0"
+__update_date__ = "2026-01-03"
 
 # 最新の追加機能リスト
 LATEST_FEATURES = [
+    # v1.3.0 - SGNAモデル実装
+    "SGNAモデル（Search-Ground-Navigate-Act）による助成金検索精度向上",
+    "信頼ドメイン制限（go.jp/or.jp/lg.jp/co.jp/org/com）による検索最適化",
+    "Progressive Wait（networkidle→domcontentloaded→load）で動的ページ対応",
+    "政府系サイトへのRate Limiting（1秒遅延）を追加",
+    "アクセシビリティツリー解析によるセマンティックリンク検索",
+    "ファイル検証ループ（PDF/ZIP内容確認・年度/公募回チェック）",
+    "ポップアップ自動クローズ・代替URL自動切り替え",
+    # v1.2.0 - Playwright基盤
     "Playwrightベースのサイト探索機能を追加",
     "助成金ページの深掘り検索によるフォーマットファイル自動検出",
     "DOM解析による募集締切日の自動抽出",
+    # v1.1.0以前
     "バージョン情報確認コマンドを追加",
     "助成金申請書の自動ドラフト生成機能",
     "SNS投稿記事作成機能（Facebook/Instagram対応）",
     "月次活動サマリレポート自動生成",
     "助成金フォーマットファイルのダウンロード・提供機能",
     "共鳴度スコアによる助成金マッチング",
-    "ObserverAgentのリファクタリング（URL検証・検索精度の向上）",
 ]
 
 

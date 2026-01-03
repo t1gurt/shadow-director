@@ -45,13 +45,18 @@ NPO法人の代表者は、想いと行動力を持ちながらも、常に事�
 
 **「あなたが寝ている間に、チャンスを見つけ出す。」**
 
-- **Tech:** Gemini 3.0 Flash + Google Search Grounding + Playwright
+- **Tech:** Gemini 3.0 Flash + Google Search Grounding + Playwright + **SGNAモデル**
 - **Features:**
-  - **Google Search Grounding**: 助成金情報や企業のCSR活動を検索
+  - **SGNAモデル（Search-Ground-Navigate-Act）**: 助成金検索の精度と信頼性を大幅に向上
+    - **Site Restrictions**: 信頼ドメイン（go.jp/or.jp/lg.jp/co.jp/org/com）を優先検索
+    - **Landing Page Priority**: PDFへの直リンクより公募ページを優先
+    - **Progressive Wait**: networkidle → domcontentloaded → load の段階的待機
+    - **Rate Limiting**: 政府系サイトへの1秒遅延でサーバー配慮
+  - **Accessibility Tree Parsing**: CSSセレクタに依存しないセマンティックリンク検索
+  - **File Validation Loop**: PDF/ZIPのダウンロード後に年度・公募回を自動検証
+  - **Error Recovery**: ポップアップ自動クローズ、代替URL自動試行
   - **Playwright Site Explorer**: DOM解析によるサイト深掘り検索、フォーマットファイル自動検出
-  - **Enhanced Verification**: 公式サイトのURL検証と品質評価（信頼性スコア）機能を強化
   - **Resonance Reasoning**: 財団の理念と自団体の「Soul Profile」の共鳴度（マッチ度）を推論
-  - **自律的トリガー**: ユーザーが「助成金を探して」と言うか、インタビュー完了時に自動実行
   - **週次スケジュール**: Discord Tasks Loopによる定期実行（168時間/週）
 
 ### 3. ✍️ Shadow Drafter (Action Agent) - ✅ Implemented
@@ -131,7 +136,7 @@ graph TD
 - **Google Cloud Run**: フルマネージドコンテナ実行環境
   - Region: `us-central1`
   - Instances: `min=1, max=1` (Discord Bot用シングルトン構成)
-  - Memory: `1Gi`
+  - Memory: `2Gi` (Playwrightブラウザ実行用に増量)
 - **Google Cloud Storage (GCS)**: プロファイルデータ永続化
   - Bucket: `gs://zenn-shadow-director-data`
   - プロファイル: `profiles/{user_id}/soul_profile.json`
@@ -168,9 +173,10 @@ shadow-director/
 │   │   ├── gdocs_tool.py         # Google Docs API Tool
 │   │   └── site_explorer.py      # Playwright基盤クラス
 │   ├── logic/
-│   │   ├── grant_finder.py       # 助成金検索ロジック
+│   │   ├── grant_finder.py       # 助成金検索ロジック（SGNAモデル実装）
 │   │   ├── grant_validator.py    # URL検証・品質評価
-│   │   └── grant_page_scraper.py # Playwright助成金ページスクレイパー
+│   │   ├── grant_page_scraper.py # Playwright助成金ページスクレイパー
+│   │   └── file_validator.py     # PDF/ZIPファイル検証（SGNAモデル）
 │   └── memory/
 │       └── profile_manager.py    # GCS操作 (プロファイル管理)
 └── config/
