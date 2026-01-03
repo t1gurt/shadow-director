@@ -26,13 +26,13 @@ class Orchestrator:
         self.client = self._init_client()
     
     def _init_client(self):
+        """Initialize Gemini client using Vertex AI backend."""
         try:
-            # Using Flash for routing (Router) as it needs to be fast
-            from google import genai
-            from google.genai.types import HttpOptions
-            return genai.Client(http_options=HttpOptions(api_version="v1beta1"))
-        except:
-             return None
+            from src.utils.gemini_client import get_gemini_client
+            return get_gemini_client()
+        except Exception as e:
+            logging.error(f"[ORCHESTRATOR] Failed to initialize Gemini client: {e}")
+            return None
 
     def _load_config(self) -> Dict[str, Any]:
         try:

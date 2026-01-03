@@ -4,8 +4,7 @@ import os
 import re
 import logging
 from datetime import datetime
-from google import genai
-from google.genai.types import HttpOptions, GenerateContentConfig
+from google.genai.types import GenerateContentConfig
 
 from src.memory.profile_manager import ProfileManager
 from src.tools.search_tool import SearchTool
@@ -26,18 +25,14 @@ class PRAgent:
             return {}
 
     def _init_client(self):
-        project_id = self.config.get("model_config", {}).get("project_id")
-        location = self.config.get("model_config", {}).get("location", "us-central1")
-        
-        if project_id:
-            os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
-        os.environ["GOOGLE_CLOUD_LOCATION"] = location
-        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-        
+        """Initialize Gemini client using Vertex AI backend."""
         try:
-            return genai.Client(http_options=HttpOptions(api_version="v1beta1"))
+            from src.utils.gemini_client import get_gemini_client
+            client = get_gemini_client()
+            logging.info("[PR_AGENT] Gemini client initialized via Vertex AI")
+            return client
         except Exception as e:
-            print(f"Failed to init GenAI client: {e}")
+            logging.error(f"[PR_AGENT] Failed to init Gemini client: {e}")
             return None
 
     def remember_sns_info(self, user_id: str, platform: str, url: str) -> str:

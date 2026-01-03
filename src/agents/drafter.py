@@ -3,8 +3,6 @@ import yaml
 import os
 import asyncio
 import logging
-from google import genai
-from google.genai.types import HttpOptions
 from src.tools.gdocs_tool import GoogleDocsTool
 from src.memory.profile_manager import ProfileManager
 from src.tools.file_downloader import FileDownloader
@@ -15,30 +13,24 @@ class DrafterAgent:
         self.config = self._load_config()
         self.system_prompt = self.config.get("system_prompts", {}).get("drafter", "")
         
-        # Initialize Google Gen AI Client
-        project_id = self.config.get("model_config", {}).get("project_id")
-        location = self.config.get("model_config", {}).get("location", "us-central1")
-        
-        if project_id:
-            os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
-        os.environ["GOOGLE_CLOUD_LOCATION"] = location
-        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-        
+        # Initialize Gemini client via Vertex AI backend
         try:
-            self.client = genai.Client(http_options=HttpOptions(api_version="v1beta1"))
+            from src.utils.gemini_client import get_gemini_client
+            self.client = get_gemini_client()
+            logging.info("[DRAFTER] Gemini client initialized via Vertex AI")
         except Exception as e:
-            print(f"Failed to init GenAI client: {e}")
+            logging.error(f"[DRAFTER] Failed to init Gemini client: {e}")
             self.client = None
             
         # Using Interviewer model (Pro) for drafting as it requires high reasoning/writing capability
-        # Or we can define a separate drafter_model in config if needed. 
-        # For now, reusing interviewer_model or defaulting to gemini-2.5-pro
         self.model_name = self.config.get("model_config", {}).get("interviewer_model")
         if not self.model_name:
              raise ValueError("interviewer_model (for drafter) not found in config")
         self.docs_tool = GoogleDocsTool()
         self.file_downloader = FileDownloader()
-        self.page_scraper = GrantPageScraper()
+        
+        # Initialize page scraper with Gemini client for visual fallback
+        self.page_scraper = GrantPageScraper(gemini_client=self.client, model_name=self.model_name)
 
     def _load_config(self) -> Dict[str, Any]:
         try:
