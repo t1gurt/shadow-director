@@ -42,6 +42,11 @@ echo "------------------------------------------------"
 gcloud builds submit --tag $IMAGE_NAME
 
 # 2. Deploy to Cloud Run
+# Optional: Set this to your Agent Engine ID if you have one created
+# If not set, the app will try to find or create one automatically (which may fail if permissions are insufficient)
+# Run 'python3 setup_agent_engine.py' locally to create/get an ID
+AGENT_ENGINE_ID="" 
+
 echo "------------------------------------------------"
 echo "Step 2: Deploying to Cloud Run..."
 echo "------------------------------------------------"
@@ -51,7 +56,7 @@ gcloud run deploy $SERVICE_NAME \
     --platform managed \
     --allow-unauthenticated \
     --memory 2Gi \
-    --set-env-vars "APP_ENV=production,GCP_PROJECT=$PROJECT_ID,GCP_LOCATION=global,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=True,GCS_BUCKET_NAME=$GCS_BUCKET,DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN,USE_MEMORY_BANK=True"
+    --set-env-vars "APP_ENV=production,GCP_PROJECT=$PROJECT_ID,GCP_LOCATION=global,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=True,GCS_BUCKET_NAME=$GCS_BUCKET,DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN,USE_MEMORY_BANK=True,GOOGLE_CLOUD_AGENT_ENGINE_ID=$AGENT_ENGINE_ID"
 
 echo "------------------------------------------------"
 echo "Step 3: Configuring Service Account Permissions..."

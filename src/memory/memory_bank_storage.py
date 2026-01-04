@@ -30,19 +30,21 @@ class MemoryBankStorage:
     Data is organized by channel_id (scope) for team collaboration.
     """
     
-    def __init__(self, project_id: str = None, location: str = "us-central1"):
+    def __init__(self, project_id: str = None, location: str = "us-central1", agent_engine_id: str = None):
         """
         Initialize Memory Bank storage.
         
         Args:
             project_id: Google Cloud project ID
             location: Vertex AI location (default: us-central1)
+            agent_engine_id: Optional explicit Agent Engine ID
         """
         if not MEMORY_BANK_AVAILABLE:
             raise ImportError("google-cloud-aiplatform is required for MemoryBankStorage")
         
         self.project_id = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
         self.location = location
+        self.agent_engine_id_override = agent_engine_id or os.environ.get("GOOGLE_CLOUD_AGENT_ENGINE_ID")
         
         # Initialize Vertex AI
         aiplatform.init(project=self.project_id, location=self.location)
@@ -66,7 +68,20 @@ class MemoryBankStorage:
         Returns:
             Agent Engine resource name
         """
-        # List existing Agent Engines to find one for Shadow Director
+        # 1. Use explicit ID if provided
+        if self.agent_engine_id_override:
+            # Format: projects/{project}/locations/{location}/reasoningEngines/{id}
+            if "/" in self.agent_engine_id_override:
+                # Already a full resource name
+                name = self.agent_engine_id_override
+            else:
+                # ID only
+                name = f"{self.parent}/reasoningEngines/{self.agent_engine_id_override}"
+            
+            logging.info(f"[MEMORY_BANK] Using configured Agent Engine ID: {name}")
+            return name
+
+        # 2. List existing Agent Engines to find one for Shadow Director
         try:
             # Try using the direct method without request object (newer API)
             try:
