@@ -292,10 +292,11 @@ class FileDownloader:
             import re
             from urllib.parse import urljoin
             
-            # Extensions regex pattern
-            ext_pattern = '|'.join([re.escape(ext) for ext in self.SUPPORTED_EXTENSIONS.keys()])
-            # Pattern: href=["']([^"']+\.(?:pdf|doc|docx|xls|xlsx|zip))["']
-            link_pattern = r'href=["\']([^"\']+\.(?:' + ext_pattern.replace('.', '') + r'))["\']'
+            # Extensions pattern (without dots) - e.g., pdf|doc|docx|xls|xlsx|zip|txt
+            extensions_no_dot = [ext.lstrip('.') for ext in self.SUPPORTED_EXTENSIONS.keys()]
+            ext_pattern = '|'.join(extensions_no_dot)
+            # Pattern: href=["']([^"']+\.(?:pdf|doc|docx|xls|xlsx|zip|txt))["']
+            link_pattern = r'href=["\']([^"\']+\.(?:' + ext_pattern + r'))["\']'
             
             matches = re.findall(link_pattern, content, re.IGNORECASE)
             
