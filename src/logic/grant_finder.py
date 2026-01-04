@@ -508,6 +508,8 @@ class GrantFinder:
                         thinking_config=thinking_config
                     )
                 )
+
+                logging.info(f"[GRANT_FINDER] Retry {retry_num + 1} response: {response.text}")
                 
                 retry_url_match = re.search(r'\*\*公式URL\*\*:\s*(.+)', response.text)
                 if retry_url_match:

@@ -4,7 +4,8 @@ model_config:
   interviewer_model: "gemini-3-pro-preview" 
   observer_model: "gemini-3-pro-preview"
   router_model: "gemini-3-pro-preview"
-  slide_generator_model: "gemini-3-pro-preview"
+  # Image generation model - supports multi-modal output
+  slide_generator_model: "gemini-3-pro-image-preview"
   location: "global"
 
 system_prompts:
