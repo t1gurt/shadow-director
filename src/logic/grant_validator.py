@@ -99,31 +99,54 @@ class GrantValidator:
     def extract_organization_name(self, grant_name: str) -> Optional[str]:
         """
         Extract organization name from grant name.
+        Removes common organizational prefixes and extracts the proper organization name.
         """
         if not grant_name:
             return None
         
-        # Common patterns for organization names
+        # Step 1: Remove common organizational prefixes
+        # Remove these to get to the actual organization name
+        cleaned = grant_name
+        prefixes_to_remove = [
+            '公益財団法人', '一般財団法人', '公益社団法人', '一般社団法人',
+            '社会福祉法人', '特定非営利活動法人', 'NPO法人',
+            '独立行政法人', '地方独立行政法人', '国立研究開発法人'
+        ]
+        
+        for prefix in prefixes_to_remove:
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+                break
+        
+        # Step 2: Extract organization name with improved patterns
+        # Use [^\s　]+ instead of .+? to avoid matching prefixes only
         patterns = [
-            r'(.+?財団)',  # XX財団
-            r'(.+?基金)',  # XX基金
-            r'(.+?協会)',  # XX協会
-            r'(.+?会)',    # XX会
-            r'(.+?団体)',  # XX団体
-            r'(.+?機構)',  # XX機構
-            r'(.+?法人)',  # XX法人
-            r'([^\s]+株式会社)',  # XX株式会社
+            r'([^\s　]+財団)',  # XX財団
+            r'([^\s　]+基金)',  # XX基金
+            r'([^\s　]+協会)',  # XX協会
+            r'([^\s　]+会)',    # XX会
+            r'([^\s　]+団体)',  # XX団体
+            r'([^\s　]+機構)',  # XX機構
+            r'([^\s　]+法人)',  # XX法人
+            r'([^\s　]+株式会社)',  # XX株式会社
         ]
         
         for pattern in patterns:
-            match = re.search(pattern, grant_name)
+            match = re.search(pattern, cleaned)
             if match:
-                return match.group(1)
+                org_name = match.group(1)
+                # Validation: skip if org_name is too generic
+                generic_terms = ['公益', '一般', '社会', '福祉', '特定', '非営利']
+                if not any(org_name.startswith(term) for term in generic_terms):
+                    return org_name
         
-        # Fallback: take first word/phrase before space or special character
-        parts = re.split(r'[\s　]+', grant_name)
-        if parts:
-            return parts[0]
+        # Step 3: Fallback - take first meaningful word
+        parts = re.split(r'[\s　]+', cleaned)
+        if parts and len(parts[0]) > 1:
+            # Additional check: avoid returning single-character or very generic terms
+            first_part = parts[0]
+            if len(first_part) >= 2:
+                return first_part
         
         return None
 

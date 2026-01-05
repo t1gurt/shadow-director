@@ -350,14 +350,17 @@ class DrafterAgent:
 
     def create_draft(self, user_id: str, grant_info: str) -> tuple[str, str, str, List[Tuple[str, str]]]:
         """
-        Generates a grant application draft based on researched format.
+        Generates a grant application draft based on researched format with progress notifications.
         
         Returns:
             tuple: (message, draft_content, filename, format_files)
             - format_files: List of (file_path, filename) tuples for downloaded files
         """
         import logging
+        from src.utils.progress_notifier import get_progress_notifier, ProgressStage
+        
         logging.info(f"[DRAFTER] create_draft started for user: {user_id}")
+        notifier = get_progress_notifier()
         
         pm = ProfileManager(user_id=user_id)
         profile = pm.get_profile_context()
@@ -385,7 +388,16 @@ class DrafterAgent:
             if match:
                 grant_name = match.group(0)
         
+        # Create display name (max 20 chars) for notifications
+        grant_display_name = grant_name[:20] + "..." if len(grant_name) > 20 else grant_name
+        
         logging.info(f"[DRAFTER] Grant name: {grant_name}, URL: {grant_url}")
+        
+        # Start notification
+        notifier.notify_sync(
+            ProgressStage.STARTING,
+            f"✨ [{grant_display_name}] ドラフト作成を開始します..."
+        )
         
         # Step 1: Research the application format (prioritize URL if available)
         logging.info(f"[DRAFTER] Step 1: Researching format for '{grant_name}'")
@@ -393,6 +405,11 @@ class DrafterAgent:
         
         # Step 2: Generate draft based on format
         logging.info(f"[DRAFTER] Step 2: Generating format-aware draft")
+        
+        notifier.notify_sync(
+            ProgressStage.PROCESSING,
+            f"📝 [{grant_display_name}] ドラフトを生成中..."
+        )
         
         full_prompt = f"""
 {self.system_prompt}
@@ -455,6 +472,11 @@ class DrafterAgent:
             
             logging.info(f"[DRAFTER] Title: {title}")
             
+            notifier.notify_sync(
+                ProgressStage.PROCESSING,
+                f"💾 [{grant_display_name}] ドキュメントを保存中..."
+            )
+            
             file_path = self.docs_tool.create_document(title, draft_content, user_id=user_id)
             logging.info(f"[DRAFTER] Document saved: {file_path}")
             
@@ -474,11 +496,24 @@ class DrafterAgent:
             
             message = f"ドラフトを作成しました: {file_path}"
             
+            # Completion notification
+            notifier.notify_sync(
+                ProgressStage.COMPLETED,
+                f"✅ [{grant_display_name}] ドラフト作成完了！"
+            )
+            
             logging.info(f"[DRAFTER] create_draft completed successfully")
             return (message, draft_content, filename, format_files)
             
         except Exception as e:
             logging.error(f"[DRAFTER] Error in create_draft: {e}", exc_info=True)
+            
+            # Error notification
+            notifier.notify_sync(
+                ProgressStage.ERROR,
+                f"⚠️ [{grant_display_name}] エラー発生: {str(e)[:30]}..."
+            )
+            
             error_msg = f"ドラフト作成エラー: {e}"
             return (error_msg, "", "", [])
 

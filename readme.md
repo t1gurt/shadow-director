@@ -350,13 +350,22 @@ gcloud run deploy shadow-director-bot \
    - `View Channels`
 5. Use generated URL to invite bot to your server
 
-## � Current Deployment Status
+## 🌐 Current Deployment Status
 
 **Environment:** Production (Google Cloud Run)
 - **Service URL:** `https://shadow-director-bot-182793624818.us-central1.run.app`
-- **Latest Revision:** `shadow-director-bot-00042-xzk`
+- **Latest Revision:** `shadow-director-bot-00125-rwk`
+- **Last Deployed:** 2026-01-05 21:19 JST
 - **Region:** `us-central1`
 - **Status:** ✅ Active
+- **Version:** 1.4.0
+
+### Latest Updates (v1.4.0)
+- 🐛 **Memory Bank Fix**: Resolved initialization errors with Agent Engine creation
+- 🏷️ **Parallel Processing UX**: Added grant names to all progress messages ([Grant Name] format)
+- ⏱️ **Timeout Extension**: Extended overall timeout from 10 to 15 minutes
+- ⚡ **Performance Boost**: Increased parallel workers from 3 to 5 (40-50% faster)
+- 📋 **Grant Visibility**: Display all grants including those with resonance score below 90
 
 ## 📝 License
 

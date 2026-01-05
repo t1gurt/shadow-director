@@ -20,7 +20,7 @@ class SiteExplorer:
     # Supported file extensions for grant format files
     FILE_EXTENSIONS = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip']
     
-    def __init__(self, headless: bool = True, timeout: int = 30000):
+    def __init__(self, headless: bool = True, timeout: int = 15000):
         """
         Initialize SiteExplorer.
         
@@ -51,7 +51,8 @@ class SiteExplorer:
             self._playwright = await async_playwright().start()
             self.browser = await self._playwright.chromium.launch(
                 headless=self.headless,
-                args=['--no-sandbox', '--disable-dev-shm-usage']
+                args=['--no-sandbox', '--disable-dev-shm-usage'],
+                timeout=30000  # 30 seconds (reduced from default 180s)
             )
             self.context = await self.browser.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -120,20 +121,16 @@ class SiteExplorer:
             
             if wait_for_load:
                 if use_progressive_wait:
-                    # Progressive Wait Strategy (SGNA model)
-                    # Step 1: Try networkidle for dynamic content
+                    # Optimized Progressive Wait Strategy
+                    # Skip networkidle as modern websites rarely reach it (continuous JS execution)
+                    # Start directly with domcontentloaded for better performance
                     try:
-                        await page.goto(url, wait_until='networkidle', timeout=self.timeout)
-                        self.logger.info(f"[SITE_EXPLORER] Loaded with networkidle")
-                    except Exception as wait_error:
-                        # Step 2: Fall back to domcontentloaded if networkidle fails
-                        self.logger.warning(f"[SITE_EXPLORER] networkidle failed, trying domcontentloaded")
-                        try:
-                            await page.goto(url, wait_until='domcontentloaded', timeout=self.timeout)
-                        except Exception as dom_error:
-                            # Step 3: Last resort - basic load
-                            self.logger.warning(f"[SITE_EXPLORER] domcontentloaded failed, using load")
-                            await page.goto(url, wait_until='load', timeout=self.timeout)
+                        await page.goto(url, wait_until='domcontentloaded', timeout=self.timeout)
+                        self.logger.info(f"[SITE_EXPLORER] Loaded with domcontentloaded")
+                    except Exception as dom_error:
+                        # Fallback to basic load if domcontentloaded fails
+                        self.logger.warning(f"[SITE_EXPLORER] domcontentloaded failed, using load")
+                        await page.goto(url, wait_until='load', timeout=self.timeout)
                 else:
                     await page.goto(url, wait_until='domcontentloaded')
             else:

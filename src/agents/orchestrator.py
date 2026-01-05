@@ -391,22 +391,46 @@ class Orchestrator:
         if skipped_count > 0:
             observer_text += f"\n\n⏭️ *{skipped_count}件の助成金は既に提案済みのためスキップしました。*"
         
-        # Filter Strong Matches (resonance score >= 70) from NEW opportunities only
-        strong_matches = [
+        # Filter Top Match (resonance score >= 90, highest score only) from NEW opportunities only
+        top_matches = [
             opp for opp in new_opportunities 
-            if opp.get("resonance_score", 0) >= 70
+            if opp.get("resonance_score", 0) >= 90
         ]
         
-        print(f"[DEBUG] Found {len(opportunities)} total, {len(new_opportunities)} new, {len(strong_matches)} Strong Matches")
+        # Get only the highest scoring grant
+        strong_matches = []
+        if top_matches:
+            top_match = max(top_matches, key=lambda x: x.get("resonance_score", 0))
+            strong_matches = [top_match]
+        
+        print(f"[DEBUG] Found {len(opportunities)} total, {len(new_opportunities)} new, {len(top_matches)} with score >= 90, auto-processing top {len(strong_matches)}")
         
         # Build result message - first send the search results
         result = observer_text
         
-        # Auto-trigger Drafter for Strong Matches - process sequentially
+        # Generate slides for ALL valid opportunities (not just Top Match)
+        if new_opportunities:
+            result += "\n\n---\n\n【📊 視覚的サマリ】\n"
+            result += f"\n見つかった助成金のスライドを生成しています...\n"
+            
+            for i, opp in enumerate(new_opportunities, 1):
+                grant_title = opp['title']
+                try:
+                    logging.info(f"[ORCH] Generating slide for: {grant_title}")
+                    image_bytes, slide_filename = self.slide_generator.generate_grant_slide(opp)
+                    if image_bytes:
+                        gcs_path = self.slide_generator.save_to_gcs(image_bytes, user_id, slide_filename)
+                        if gcs_path:
+                            result += f"\n{i}. **{grant_title}** (共鳴度: {opp['resonance_score']})\n"
+                            result += f"[IMAGE_NEEDED:{user_id}:{slide_filename}]\n"
+                except Exception as e:
+                    logging.error(f"[ORCH] Slide generation failed for {grant_title}: {e}")
+        
+        # Auto-trigger Drafter for Top Match only - process the single highest scoring grant
         if strong_matches:
-            result += f"\n\n---\n\n【🎯 Strong Match検出！自動ドラフト生成開始】\n"
-            result += f"\n共鳴度70以上の案件が{len(strong_matches)}件見つかりました。\n"
-            result += "それぞれの助成金について順番に調査し、ドラフトを作成します...\n"
+            result += f"\n\n---\n\n【🎯 Top Match検出！自動ドラフト生成開始】\n"
+            result += f"\n共鳴度90以上の案件から、最も共鳴度が高い1件を自動処理します。\n"
+            result += "助成金の詳細を調査し、ドラフトを作成します...\n"
             
             # Process each grant SEQUENTIALLY with immediate message sending
             for i, opp in enumerate(strong_matches, 1):
@@ -415,21 +439,10 @@ class Orchestrator:
                 grant_result = f"\n\n---\n\n## 🔍 助成金 {i}/{len(strong_matches)}: {grant_title}\n"
                 grant_result += f"**(共鳴度: {opp['resonance_score']})**\n\n"
                 
-                # Step 1: Generate slide image for grant
-                grant_result += "**Step 1: スライド生成中...**\n"
-                try:
-                    logging.info(f"[ORCH] Generating slide for: {grant_title}")
-                    image_bytes, slide_filename = self.slide_generator.generate_grant_slide(opp)
-                    if image_bytes:
-                        gcs_path = self.slide_generator.save_to_gcs(image_bytes, user_id, slide_filename)
-                        if gcs_path:
-                            grant_result += f"📊 スライド生成完了\n[IMAGE_NEEDED:{user_id}:{slide_filename}]\n"
-                except Exception as e:
-                    logging.error(f"[ORCH] Slide generation failed: {e}")
-                    grant_result += f"⚠️ スライド生成スキップ\n"
+                # Slide already generated above, skip it here
                 
-                # Step 2: Get detailed grant information
-                grant_result += "\n**Step 2: 助成金詳細を調査中...**\n"
+                # Step 1: Get detailed grant information
+                grant_result += "**Step 1: 助成金詳細を調査中...**\n"
                 grant_details = ""
                 format_files = []
                 try:
@@ -457,8 +470,8 @@ class Orchestrator:
                     for file_path, file_name in format_files:
                         grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
                 
-                # Step 3: Create draft for this grant using collected information
-                grant_result += "\n**Step 3: ドラフト作成中...**\n"
+                # Step 2: Create draft for this grant using collected information
+                grant_result += "\n**Step 2: ドラフト作成中...**\n"
                 
                 # Format grant information for Drafter with detailed info
                 grant_info = f"""助成金名: {opp['title']}
@@ -512,7 +525,24 @@ URL: {grant_url}
                     result += grant_result
                     
         else:
-            result += "\n\n💡 今回は共鳴度70以上の Strong Match は見つかりませんでした。"
+            result += "\n\n💡 今回は共鳴度90以上の Top Match は見つかりませんでした。"
+            
+            # Show list of grants below 90 with their resonance scores
+            below_90_grants = [o for o in new_opportunities if o.get('resonance_score', 0) < 90]
+            if below_90_grants:
+                result += f"\n\n**📋 検出された助成金一覧** ({len(below_90_grants)}件):\n"
+                # Sort by resonance score descending
+                below_90_grants.sort(key=lambda x: x.get('resonance_score', 0), reverse=True)
+                for i, grant in enumerate(below_90_grants, 1):
+                    score = grant.get('resonance_score', 0)
+                    title = grant.get('title', '不明')
+                    # Truncate long titles
+                    if len(title) > 40:
+                        title = title[:40] + "..."
+                    result += f"\n{i}. **{title}** (共鳴度: {score})"
+                
+                result += "\n\n💡 ドラフトを作成したい場合は、助成金名を指定して「[助成金名]のドラフトを作成して」とお伝えください。"
+
         
         # Add footer with next scheduled run
         next_run = datetime.now() + timedelta(days=7)

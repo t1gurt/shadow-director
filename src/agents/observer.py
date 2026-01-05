@@ -83,31 +83,84 @@ class ObserverAgent:
             return "現在、条件に合う新しい助成金・資金調達機会は見つかりませんでした。", []
 
         notifier.notify_sync(ProgressStage.ANALYZING, f"{len(opportunities)}件の候補が見つかりました。詳細を調査します...")
+        
+        # Display list of found grant candidates
+        candidate_list = "\n".join([
+            f"{i+1}. {opp.get('title', '不明')[:40]}{'...' if len(opp.get('title', '')) > 40 else ''}"
+            for i, opp in enumerate(opportunities[:10])  # Show max 10
+        ])
+        if len(opportunities) > 10:
+            candidate_list += f"\n... 他{len(opportunities)-10}件"
+        
+        notifier.notify_sync(
+            ProgressStage.ANALYZING,
+            f"📋 発見した助成金候補:\n{candidate_list}"
+        )
 
-        valid_opportunities = []
+        candidates_to_verify = []
         for opp in opportunities:
             title = opp.get('title')
-            
             # Check duplication
             if self.profile_manager.is_grant_shown(opp):
                 logging.info(f"Skipping already shown grant: {title}")
                 continue
-                
-            notifier.notify_sync(ProgressStage.VERIFYING, f"検証中: {title}...", "公式ページの確認と信頼性評価")
+            candidates_to_verify.append(opp)
             
-            # 2. Find and Validate Official Page using GrantFinder
-            official_info = self.finder.find_official_page(title, current_date_str)
+        if not candidates_to_verify:
+            notifier.notify_sync(ProgressStage.COMPLETED, "新しい未提案の助成金は見つかりませんでした。")
+            return "新しい助成金は見つかりましたが、すべて過去に提案済みです。", []
+
+        notifier.notify_sync(ProgressStage.ANALYZING, f"{len(candidates_to_verify)}件の新規候補を並列検証します...")
+
+        import time
+        from concurrent.futures import ThreadPoolExecutor, wait
+        
+        valid_opportunities = []
+        start_time = time.time()
+        max_workers = 3  # Reduced from 5 to 3 for stability with Cloud Run resources
+        timeout_seconds = 1800  # 30 minutes (increased from 15 minutes for very heavy loads)
+        
+        # Run verification in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_opp = {
+                executor.submit(self._verify_single_opportunity, opp, current_date_str): opp 
+                for opp in candidates_to_verify
+            }
             
-            # Merge results
-            opp.update(official_info)
+            # Wait for completion with timeout
+            done, not_done = wait(future_to_opp.keys(), timeout=timeout_seconds)
             
-            # Filter invalid or closed grants
-            if opp.get('is_valid', False):
-                valid_opportunities.append(opp)
-                # Mark as shown so we don't show it again immediately
-                self.profile_manager.add_shown_grant(opp)
-            else:
-                logging.info(f"Skipping invalid/closed grant: {title} (Reason: {opp.get('exclude_reason') or opp.get('status')})")
+            # Cancel incomplete tasks to free resources
+            if not_done:
+                logging.warning(f"Timeout reached. {len(not_done)} tasks incomplete. Cancelling...")
+                for future in not_done:
+                    future.cancel()  # Cancel to free resources (Playwright browsers, network)
+                notifier.notify_sync(ProgressStage.ANALYZING, f"検証時間が長すぎたため、{len(not_done)}件の処理をスキップしました。")
+            
+            # Process completed tasks
+            for future in done:
+                try:
+                    # Get result with timeout to avoid hanging
+                    verified_opp = future.result(timeout=1)
+                    
+                    if verified_opp and verified_opp.get('is_valid', False):
+                        valid_opportunities.append(verified_opp)
+                        # Mark as shown so we don't show it again immediately
+                        self.profile_manager.add_shown_grant(verified_opp)
+                    else:
+                        title = future_to_opp[future].get('title', 'Unknown')
+                        reason = verified_opp.get('exclude_reason') if verified_opp else 'Verification failed'
+                        logging.info(f"Skipping invalid/closed grant: {title} (Reason: {reason})")
+                        
+                except TimeoutError:
+                    title = future_to_opp[future].get('title', 'Unknown')
+                    logging.error(f"Result retrieval timed out for: {title}")
+                except Exception as e:
+                    title = future_to_opp.get(future, {}).get('title', 'Unknown')
+                    logging.error(f"Error checking grant {title}: {e}")
+        
+        elapsed = time.time() - start_time
+        logging.info(f"[PERFORMANCE] Grant verification took {elapsed:.2f}s for {len(candidates_to_verify)} items")
 
         # 3. Format Report
         if not valid_opportunities:
@@ -168,3 +221,23 @@ class ObserverAgent:
         report += "\n💡 気になる助成金があれば、「[番号]のドラフトを作成して」と指示してください。"
         
         return report
+
+    def _verify_single_opportunity(self, opp: Dict, current_date_str: str) -> Dict:
+        """
+        Helper method to verify a single opportunity in a thread.
+        This allows parallel execution of grant verification.
+        """
+        title = opp.get('title')
+        
+        # Note: ProgressNotifier inside find_official_page might need to be thread-safe
+        # For now we rely on it being mostly stateless or handled by the external notify service
+        
+        # 2. Find and Validate Official Page using GrantFinder
+        # This includes Google Search, URL validation, and potentially Playwright
+        official_info = self.finder.find_official_page(title, current_date_str)
+        
+        # Merge results - create a copy to avoid race conditions if any
+        verified_opp = opp.copy()
+        verified_opp.update(official_info)
+        
+        return verified_opp

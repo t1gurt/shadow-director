@@ -192,6 +192,9 @@ class GrantFinder:
         """
         logging.info(f"[GRANT_FINDER] Finding official page for: {grant_name}")
         
+        # Create shortened grant name for display (max 20 chars)
+        grant_display_name = grant_name[:20] + "..." if len(grant_name) > 20 else grant_name
+        
         result = {
             'official_url': 'N/A',
             'domain': '',
@@ -339,11 +342,11 @@ class GrantFinder:
                 
                 # Notify user about URL quality
                 if quality_score >= 70:
-                    notifier.notify_sync(ProgressStage.ANALYZING, f"✅ 信頼性評価: {quality_score}点", quality_reason)
+                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ✅ 信頼性評価: {quality_score}点", quality_reason)
                 elif quality_score >= 50:
-                    notifier.notify_sync(ProgressStage.ANALYZING, f"⚠️ 信頼性評価: {quality_score}点", quality_reason)
+                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ⚠️ 信頼性評価: {quality_score}点", quality_reason)
                 else:
-                    notifier.notify_sync(ProgressStage.WARNING, f"❌ 信頼性評価: {quality_score}点（低）", quality_reason)
+                    notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ❌ 信頼性評価: {quality_score}点（低）", quality_reason)
                 
                 if quality_score < 50:
                     logging.warning(f"[GRANT_FINDER] Low quality URL: {result['official_url']}")
@@ -355,9 +358,9 @@ class GrantFinder:
                 
                 # Notify user about accessibility
                 if is_accessible:
-                    notifier.notify_sync(ProgressStage.ANALYZING, "✅ 公式ページにアクセス可能", f"URL: {final_url[:60]}...")
+                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ✅ 公式ページにアクセス可能", f"URL: {final_url[:60]}...")
                 else:
-                    notifier.notify_sync(ProgressStage.WARNING, "❌ 公式ページにアクセス不可", access_status)
+                    notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ❌ 公式ページにアクセス不可", access_status)
                 
                 if is_accessible and final_url:
                     result['official_url'] = final_url
@@ -365,7 +368,7 @@ class GrantFinder:
                     # Enhanced verification with Playwright
                     try:
                         logging.info(f"[GRANT_FINDER] Running Playwright verification for: {final_url}")
-                        notifier.notify_sync(ProgressStage.ANALYZING, "🔍 Playwrightで詳細検証中...", "ページ内容を解析しています")
+                        notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 🔍 Playwrightで詳細検証中...", "ページ内容を解析しています")
                         
                         playwright_result = self._run_playwright_verification(final_url, grant_name)
                         
@@ -377,18 +380,18 @@ class GrantFinder:
                             # Notify Playwright results
                             file_count = len(result.get('format_files', []))
                             if file_count > 0:
-                                notifier.notify_sync(ProgressStage.ANALYZING, f"📎 フォーマットファイル {file_count}件 発見", "申請書様式を検出しました")
+                                notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📎 フォーマットファイル {file_count}件 発見", "申請書様式を検出しました")
                             
                             # Update deadline info if found
                             if playwright_result.get('deadline_info'):
                                 deadline = playwright_result['deadline_info']
                                 if deadline.get('date'):
                                     result['deadline_end'] = deadline['date']
-                                    notifier.notify_sync(ProgressStage.ANALYZING, f"📅 締切日: {deadline['date']}", "ページから締切日を抽出しました")
+                                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📅 締切日: {deadline['date']}", "ページから締切日を抽出しました")
                             
                             logging.info(f"[GRANT_FINDER] Playwright found {file_count} format files")
                         else:
-                            notifier.notify_sync(ProgressStage.ANALYZING, "ℹ️ Playwright検証完了", "追加情報は見つかりませんでした")
+                            notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ℹ️ Playwright検証完了", "追加情報は見つかりませんでした")
                     except Exception as pw_error:
                         logging.warning(f"[GRANT_FINDER] Playwright verification failed: {pw_error}")
                         result['playwright_verified'] = False
@@ -439,6 +442,55 @@ class GrantFinder:
             logging.error(f"[GRANT_FINDER] Async Playwright error: {e}")
             return None
 
+    def _extract_grant_keywords(self, grant_name: str) -> str:
+        """
+        Extract meaningful keywords from grant name, excluding generic organizational terms.
+        Returns space-separated keywords suitable for search queries.
+        """
+        if not grant_name:
+            return ""
+        
+        # Remove organizational prefixes
+        cleaned = grant_name
+        prefixes_to_remove = [
+            '公益財団法人', '一般財団法人', '公益社団法人', '一般社団法人',
+            '社会福祉法人', '特定非営利活動法人', 'NPO法人',
+            '独立行政法人', '地方独立行政法人', '国立研究開発法人',
+            '令和', '平成', '年度', '第', '回'
+        ]
+        
+        for prefix in prefixes_to_remove:
+            cleaned = cleaned.replace(prefix, ' ')
+        
+        # Remove generic terms
+        generic_terms = [
+            '助成金', '補助金', '支援金', '交付金', '公募', '募集',
+            '申請', '応募', 'プログラム', '事業', '制度'
+        ]
+        
+        for term in generic_terms:
+            cleaned = cleaned.replace(term, ' ')
+        
+        # Extract meaningful words (2+ characters)
+        import re
+        words = re.findall(r'[一-龯ァ-ヶー\w]{2,}', cleaned)
+        
+        # Filter out numbers and year patterns
+        meaningful_words = []
+        for word in words:
+            # Skip if it's just numbers
+            if re.match(r'^\d+$', word):
+                continue
+            # Skip year patterns like 2026
+            if re.match(r'^20\d{2}$', word):
+                continue
+            meaningful_words.append(word)
+        
+        # Take first 2-3 meaningful words
+        keywords = ' '.join(meaningful_words[:3])
+        
+        return keywords.strip()
+
     def _retry_find_official_page(self, grant_name: str, previous_result: Dict, failure_reason: str) -> Dict:
         """
         Retries finding the official page if the first attempt failed validation.
@@ -449,32 +501,62 @@ class GrantFinder:
         """
         logging.info(f"[GRANT_FINDER] Retrying for: {grant_name}")
         notifier = get_progress_notifier()
-        notifier.notify_sync(ProgressStage.WARNING, f"URL検証失敗: {grant_name[:20]}...", f"代替URLを検索中... ({failure_reason})")
+        
+        # Create shortened grant name for display (max 20 chars)
+        grant_display_name = grant_name[:20] + "..." if len(grant_name) > 20 else grant_name
+        
+        notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ⚠️ URL検証失敗", f"代替URLを検索中... ({failure_reason})")
         
         # Extract organization name for targeted retry search
         org_name = self.validator.extract_organization_name(grant_name)
         
-        # Define multiple search strategies
-        search_queries = []
+        # Extract key terms from grant name (exclude generic terms)
+        grant_keywords = self._extract_grant_keywords(grant_name)
+        
+        # Validate: skip generic organization names
         if org_name:
+            generic_org_names = ['公益財団', '一般財団', '公益社団', '一般社団', '社会福祉法人', '公益', '一般']
+            if org_name in generic_org_names:
+                logging.warning(f"[GRANT_FINDER] Extracted org_name is too generic: {org_name}, using grant_name instead")
+                org_name = None
+        
+        # Define multiple search strategies with grant keywords included
+        search_queries = []
+        if org_name and grant_keywords:
+            # Strategy 1: Organization + Keywords
+            search_queries = [
+                f"{org_name} {grant_keywords} 募集 2026",
+                f"{org_name} {grant_keywords} 申請",
+                f"{org_name} {grant_keywords} 公募",
+                f"{org_name} 助成金 {grant_keywords}",
+            ]
+        elif org_name:
+            # Strategy 2: Organization only (but less preferred)
             search_queries = [
                 f"{org_name} 助成金 募集 2026",
                 f"{org_name} 補助金 申請",
                 f"{org_name} 支援 公募",
-                f"{org_name} 公式サイト 助成",
             ]
         else:
-            search_queries = [
-                f"{grant_name} 公式",
-                f"{grant_name} 申請",
-            ]
+            # Strategy 3: Full grant name or keywords fallback
+            if grant_keywords:
+                search_queries = [
+                    f"{grant_keywords} 助成金 公式",
+                    f"{grant_keywords} 申請 募集",
+                    f"{grant_name[:30]} 公式",  # Use first 30 chars of grant name
+                ]
+            else:
+                search_queries = [
+                    f"{grant_name} 公式",
+                    f"{grant_name} 申請",
+                ]
         
         # Try up to 3 different search strategies
         max_retries = min(3, len(search_queries))
         
         for retry_num in range(max_retries):
             query = search_queries[retry_num]
-            notifier.notify_sync(ProgressStage.SEARCHING, f"代替検索 ({retry_num + 1}/{max_retries})", f"検索: {query[:40]}...")
+            notifier.notify_sync(ProgressStage.SEARCHING, f"[{grant_display_name}] 🔍 代替検索 ({retry_num + 1}/{max_retries})", f"検索: {query[:40]}...")
             logging.info(f"[GRANT_FINDER] Retry {retry_num + 1}: searching with '{query}'")
             
             # Build site restriction for retry (SGNA model)
@@ -524,7 +606,7 @@ class GrantFinder:
                     is_retry_accessible, retry_status, retry_final_url = self.validator.validate_url_accessible(retry_url)
                     
                     if is_retry_accessible and retry_final_url:
-                        notifier.notify_sync(ProgressStage.ANALYZING, f"✅ 代替URL発見 (試行{retry_num + 1})", retry_final_url[:60])
+                        notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ✅ 代替URL発見 (試行{retry_num + 1})", retry_final_url[:60])
                         
                         previous_result['official_url'] = retry_final_url
                         previous_result['url_accessible'] = True
@@ -539,13 +621,13 @@ class GrantFinder:
         
         # All LLM retries failed - try Playwright exploration as last resort
         if org_name:
-            notifier.notify_sync(ProgressStage.SEARCHING, "🔍 Playwright深掘り検索中...", f"組織サイトを探索: {org_name}")
+            notifier.notify_sync(ProgressStage.SEARCHING, f"[{grant_display_name}] 🔍 Playwright深掘り検索中...", f"組織サイトを探索: {org_name}")
             playwright_url = self._playwright_find_grant_page(org_name, grant_name)
             
             if playwright_url:
                 is_accessible, status, final_url = self.validator.validate_url_accessible(playwright_url)
                 if is_accessible and final_url:
-                    notifier.notify_sync(ProgressStage.ANALYZING, "✅ Playwrightで代替URL発見", final_url[:60])
+                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ✅ Playwrightで代替URL発見", final_url[:60])
                     previous_result['official_url'] = final_url
                     previous_result['url_accessible'] = True
                     previous_result['url_access_status'] = "Playwright検索で発見"
@@ -553,7 +635,7 @@ class GrantFinder:
                     return previous_result
         
         # All retries failed
-        notifier.notify_sync(ProgressStage.WARNING, "❌ 代替URLが見つかりませんでした", f"{max_retries}回の検索とPlaywright探索で発見できず")
+        notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ❌ 代替URLが見つかりませんでした", f"{max_retries}回の検索とPlaywright探索で発見できず")
         previous_result['is_valid'] = False
         previous_result['url_accessible'] = False
         previous_result['exclude_reason'] = f"URL検証失敗（{max_retries}回リトライ + Playwright探索失敗）"

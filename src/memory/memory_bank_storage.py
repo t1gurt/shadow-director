@@ -30,7 +30,7 @@ class MemoryBankStorage:
     Data is organized by channel_id (scope) for team collaboration.
     """
     
-    def __init__(self, project_id: str = None, location: str = "us-central1", agent_engine_id: str = None):
+    def __init__(self, project_id: str = None, location: str = "global", agent_engine_id: str = None):
         """
         Initialize Memory Bank storage.
         
@@ -127,11 +127,12 @@ class MemoryBankStorage:
                 raise AttributeError("ReasoningEngineSpec type not available in SDK")
             
             # Create Agent Engine with Memory Bank config
+            # Note: Always use empty list for class_methods to avoid NoneType errors
             reasoning_engine = reasoning_engine_types.ReasoningEngine(
                 display_name="shadow-director-memory-bank",
                 spec=reasoning_engine_types.ReasoningEngineSpec(
-                    # Memory Bank configuration - use empty dict if class_methods not supported
-                    class_methods=[] if hasattr(reasoning_engine_types.ReasoningEngineSpec, 'class_methods') else None
+                    # Memory Bank configuration - use empty dict to avoid .items() error
+                    class_methods={}
                 )
             )
             
