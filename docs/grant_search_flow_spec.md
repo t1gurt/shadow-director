@@ -14,15 +14,26 @@
 
 ### 🚀 エントリーポイント
 
-**ファイル**: [`orchestrator.py:293-295`](file:///c:/Users/keisu/workspace/shadow-director/src/agents/orchestrator.py#L293-L295)
+**ファイル**: [`orchestrator.py:293-310`](file:///c:/Users/keisu/workspace/shadow-director/src/agents/orchestrator.py#L293-L310)
 
 ```python
 if intent == "OBSERVE":
-    # Manual Observer trigger
-    return self._run_observer(user_id)
+    # Manual Observer trigger - returns (report, strong_matches)
+    report, strong_matches = self._run_observer(user_id)
+    
+    if strong_matches:
+        # Add marker for caller to trigger draft processing AFTER sending report
+        matches_json = json.dumps([...])  # Top match data
+        report += f"\n[DRAFT_PENDING:{user_id}:{matches_json}]"
+    
+    return report
 ```
 
 **トリガー**: ユーザーが「助成金を探して」とメンションを送信
+
+> [!NOTE]
+> `_run_observer()` はタプル `(report, strong_matches)` を返します。
+> レポート送信後に `DRAFT_PENDING` マーカーを検知してドラフト処理を非同期で開始します。
 
 ---
 
@@ -272,16 +283,27 @@ if self.profile_manager.is_grant_shown(opp):
 
 ## Phase 3: 自動ドラフト作成（Top Match検出）
 
+> [!IMPORTANT]
+> Phase 3は **非同期処理** です。レポートとスライドが送信された後に開始されます。
+
+### Step 3.0: レポート・スライド送信（先行処理）
+
+**処理内容**:
+1. `_run_observer()` が `(report, strong_matches)` を返す
+2. レポートに `[DRAFT_PENDING:user_id:matches_json]` マーカーを追加
+3. Discord にレポートとスライダを **即時送信**
+4. マーカーを検知して非同期でドラフト処理を開始
+
 ### Step 3.1: フィルタリング
 
-**ファイル**: [`orchestrator.py:394-406`](file:///c:/Users/keisu/workspace/shadow-director/src/agents/orchestrator.py#L394-L406)
+**ファイル**: [`orchestrator.py:413-425`](file:///c:/Users/keisu/workspace/shadow-director/src/agents/orchestrator.py#L413-L425)
 
 **処理内容**:
 1. 既出助成金を除外
 2. 共鳴度90以上の助成金を抽出 → `top_matches`
 3. 最も共鳴度が高い1件のみ選択 → `strong_matches`
 
-**Discord通知** (Top Matchあり):
+**Discord通知** (Top Matchあり - レポート送信後に表示):
 ```
 ---
 
@@ -299,9 +321,13 @@ if self.profile_manager.is_grant_shown(opp):
 
 ### Step 3.2: 助成金処理ループ（1件のみ）
 
-**ファイル**: [`orchestrator.py:412-513`](file:///c:/Users/keisu/workspace/shadow-director/src/agents/orchestrator.py#L412-L513)
+**ファイル**: [`orchestrator.py:482-597`](file:///c:/Users/keisu/workspace/shadow-director/src/agents/orchestrator.py#L482-L597) (`_process_top_match_drafts`メソッド)
 
-#### 3.2.1 スライド生成
+> [!NOTE]
+> スライド生成は Phase 2 完了時（レポート作成前）に全助成金分実行されます。
+> Phase 3 では詳細調査とドラフト作成のみを行います。
+
+#### 3.2.1 処理開始通知
 
 **Discord通知**:
 ```
@@ -309,23 +335,6 @@ if self.profile_manager.is_grant_shown(opp):
 
 ## 🔍 助成金 1/1: {助成金名}
 **(共鳴度: 95)**
-
-**Step 1: スライド生成中...**
-```
-
-**処理内容**:
-- 助成金情報の視覚的サマリ画像を生成
-- GCSに保存
-
-**Discord通知** (成功時):
-```
-📊 スライド生成完了
-[IMAGE_NEEDED:{user_id}:{filename}]
-```
-
-**Discord通知** (失敗時):
-```
-⚠️ スライド生成スキップ
 ```
 
 #### 3.2.2 詳細調査
@@ -409,7 +418,7 @@ if self.profile_manager.is_grant_shown(opp):
 
 ```mermaid
 graph TD
-    A[ユーザー: 助成金を探して] --> B[orchestrator._run_observer]
+    A[ユーザー: 助成金を探して] --> B["orchestrator._run_observer()"]
     B --> C[observer.observe]
     C --> D{Phase 1: Gemini検索}
     D --> E{助成金見つかった?}
@@ -432,16 +441,19 @@ graph TD
     Q -->|No| G
     Q -->|Yes| R{有効な助成金あり?}
     R -->|No| S[終了: 有効なものなし]
-    R -->|Yes| T[レポート作成]
+    R -->|Yes| T[スライド生成 + レポート作成]
     
-    T --> U{Phase 3: Top Match検出}
-    U --> V{共鳴度90以上あり?}
-    V -->|No| W[終了: レポートのみ]
-    V -->|Yes| X[最高得点1件選択]
-    X --> Y[スライド生成]
-    Y --> Z[詳細調査]
-    Z --> AA[ドラフト作成]
-    AA --> AB[完了通知]
+    T --> U["Discord: レポート送信 (即時)"]
+    U --> V["Discord: スライド画像送信 (即時)"]
+    V --> W{DRAFT_PENDING検出?}
+    W -->|No| X[終了: レポートのみ]
+    W -->|Yes| Y["Phase 3: 非同期ドラフト処理開始"]
+    
+    Y --> Z["_process_top_match_drafts()"]
+    Z --> AA[詳細調査]
+    AA --> AB[ドラフト作成]
+    AB --> AC["Discord: ドラフトファイル送信"]
+    AC --> AD[完了通知]
 ```
 
 ---
@@ -471,25 +483,25 @@ graph TD
 00:30 ❌ 代替URLが見つかりませんでした
 
 00:31 ⚙️ レポートを作成中...
+00:31 📊 スライド生成中...
 00:32 ✅ 調査完了！ 1件の助成金を提案します。
 
-[レポート表示]
+[レポート表示 - 即時送信]
+[スライド画像表示 - 即時送信]
 
----
+--- 非同期処理開始 ---
 
 【🎯 Top Match検出！自動ドラフト生成開始】
 
-00:33 ## 🔍 助成金 1/1: ○○財団 環境助成
-00:33 **Step 1: スライド生成中...**
-00:35 📊 スライド生成完了
-[画像表示]
+00:35 ## 🔍 助成金 1/1: ○○財団 環境助成
+00:35 **(共鳴度: 95)**
 
-00:36 **Step 2: 助成金詳細を調査中...**
+00:36 **Step 1: 助成金詳細を調査中...**
 00:45 📋 詳細取得完了
 00:45 📎 申請フォーマットファイル
 [ファイル送信]
 
-00:46 **Step 3: ドラフト作成中...**
+00:46 **Step 2: ドラフト作成中...**
 01:30 ✅ ドラフト作成完了
 [ドラフトファイル送信]
 
@@ -499,6 +511,8 @@ graph TD
 ```
 
 **合計所要時間**: 約1分30秒
+- **レポート表示まで**: 約32秒（ユーザーはすぐに結果を確認可能）
+- **ドラフト完成まで**: 追加で約58秒
 
 ### ケース2: Top Matchなし（共鳴度70-89のみ）
 

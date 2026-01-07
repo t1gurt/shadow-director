@@ -30,6 +30,9 @@ class GrantPageScraper:
         '申請書', '応募書', '申込書', '届出書', '調書',
         # 様式・フォーマット系
         '様式', 'フォーマット', 'テンプレート', '書式', '雛形', 'ひな形',
+        # 募集要項系（追加）
+        '募集要項', '公募要領', '応募要項', '交付要綱', '実施要領',
+        '募集案内', 'ガイドライン', 'guidelines', '公募要項',
         # ダウンロード系
         'ダウンロード', 'download', 'DL', '取得', '入手',
         # ファイル種別系
@@ -64,7 +67,7 @@ class GrantPageScraper:
     # Debug configuration
     DEBUG_SCREENSHOT_DIR = '/tmp/grant_scraper_debug'
     
-    def __init__(self, site_explorer=None, gemini_client=None, model_name: str = "gemini-3.0-pro"):
+    def __init__(self, site_explorer=None, gemini_client=None, model_name: str = "gemini-3.0-pro", timeout: int = 15000):
         """
         Initialize GrantPageScraper.
         
@@ -72,10 +75,12 @@ class GrantPageScraper:
             site_explorer: SiteExplorer instance (will be created if not provided)
             gemini_client: Gemini API client for visual reasoning fallback
             model_name: Gemini model name for visual analysis
+            timeout: Playwright timeout in milliseconds (default 15000ms = 15 seconds)
         """
         self.site_explorer = site_explorer
         self.gemini_client = gemini_client
         self.model_name = model_name
+        self.timeout = timeout
         self.visual_analyzer = None
         self.logger = logging.getLogger(__name__)
         
@@ -112,7 +117,7 @@ class GrantPageScraper:
         
         try:
             if not explorer:
-                explorer = SiteExplorer(headless=True)
+                explorer = SiteExplorer(headless=True, timeout=self.timeout)
                 await explorer.start()
                 created_explorer = True
             
@@ -211,7 +216,7 @@ class GrantPageScraper:
         visited_urls = set()
         urls_to_visit = [(start_url, 0)]  # (url, depth)
         
-        async with SiteExplorer(headless=True) as explorer:
+        async with SiteExplorer(headless=True, timeout=self.timeout) as explorer:
             while urls_to_visit:
                 current_url, depth = urls_to_visit.pop(0)
                 

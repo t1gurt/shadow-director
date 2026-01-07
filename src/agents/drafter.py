@@ -30,7 +30,12 @@ class DrafterAgent:
         self.file_downloader = FileDownloader()
         
         # Initialize page scraper with Gemini client for visual fallback
-        self.page_scraper = GrantPageScraper(gemini_client=self.client, model_name=self.model_name)
+        # Use shorter timeout (10s) for drafter operations to avoid long hangs
+        self.page_scraper = GrantPageScraper(
+            gemini_client=self.client, 
+            model_name=self.model_name,
+            timeout=10000  # 10 seconds timeout for Playwright operations
+        )
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -232,7 +237,143 @@ class DrafterAgent:
 - 費用対効果
 """, [])
 
+    def _analyze_application_format(
+        self, 
+        format_files: List[Tuple[str, str]], 
+        grant_name: str
+    ) -> str:
+        """
+        申請フォーマットファイルの内容をGemini 3.0 Proで解析し、
+        質問項目・記入欄・文字数制限などを抽出する。
+        
+        Args:
+            format_files: ダウンロードしたファイルのリスト[(file_path, filename), ...]
+            grant_name: 助成金名
+            
+        Returns:
+            解析結果のテキスト（質問項目、文字数制限、記入のポイントなど）
+        """
+        if not format_files:
+            logging.info("[DRAFTER] No format files to analyze")
+            return ""
+        
+        logging.info(f"[DRAFTER] Analyzing {len(format_files)} format files with Gemini")
+        
+        # ファイル内容を収集
+        file_contents_text = ""
+        analyzed_count = 0
+        
+        for file_path, filename in format_files[:5]:  # 最大5ファイルまで
+            try:
+                file_ext = filename.lower().split('.')[-1] if '.' in filename else ''
+                
+                # PDFファイルの処理
+                if file_ext == 'pdf':
+                    content = self._extract_pdf_content(file_path)
+                    if content:
+                        file_contents_text += f"\n\n---\n### ファイル: {filename}\n{content[:8000]}\n"
+                        analyzed_count += 1
+                        
+                # Word/Excelファイルの処理
+                elif file_ext in ['doc', 'docx', 'xls', 'xlsx']:
+                    content = self._extract_office_content(file_path, file_ext)
+                    if content:
+                        file_contents_text += f"\n\n---\n### ファイル: {filename}\n{content[:8000]}\n"
+                        analyzed_count += 1
+                        
+                # テキストファイルの処理
+                elif file_ext in ['txt', 'text']:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()[:8000]
+                        file_contents_text += f"\n\n---\n### ファイル: {filename}\n{content}\n"
+                        analyzed_count += 1
+                        
+            except Exception as e:
+                logging.warning(f"[DRAFTER] Error reading file {filename}: {e}")
+                continue
+        
+        if not file_contents_text or analyzed_count == 0:
+            logging.info("[DRAFTER] Could not extract content from any files")
+            return ""
+        
+        logging.info(f"[DRAFTER] Successfully extracted content from {analyzed_count} files")
+        
+        # Gemini 3.0 Proでファイル内容を解析
+        try:
+            format_analyzer_prompt = self.config.get("system_prompts", {}).get("format_analyzer", "")
+            if not format_analyzer_prompt:
+                logging.warning("[DRAFTER] format_analyzer prompt not found in config")
+                return ""
+            
+            # プロンプトにファイル内容を埋め込み
+            full_prompt = format_analyzer_prompt.replace("{file_contents}", file_contents_text)
+            
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=full_prompt
+            )
+            
+            analysis_result = response.text
+            logging.info(f"[DRAFTER] Format analysis completed, length: {len(analysis_result)} chars")
+            
+            return analysis_result
+            
+        except Exception as e:
+            logging.error(f"[DRAFTER] Format analysis failed: {e}")
+            return ""
+    
+    def _extract_pdf_content(self, file_path: str) -> str:
+        """PDFファイルからテキストを抽出する"""
+        try:
+            import fitz  # PyMuPDF
+            
+            doc = fitz.open(file_path)
+            text_content = ""
+            
+            for page_num in range(min(doc.page_count, 10)):  # 最大10ページまで
+                page = doc[page_num]
+                text_content += page.get_text() + "\n"
+            
+            doc.close()
+            return text_content.strip()
+            
+        except ImportError:
+            logging.warning("[DRAFTER] PyMuPDF (fitz) not installed, skipping PDF extraction")
+            return ""
+        except Exception as e:
+            logging.warning(f"[DRAFTER] PDF extraction failed: {e}")
+            return ""
+    
+    def _extract_office_content(self, file_path: str, file_ext: str) -> str:
+        """Word/Excelファイルからテキストを抽出する"""
+        try:
+            if file_ext in ['doc', 'docx']:
+                from docx import Document
+                doc = Document(file_path)
+                return "\n".join([para.text for para in doc.paragraphs])
+                
+            elif file_ext in ['xls', 'xlsx']:
+                import openpyxl
+                wb = openpyxl.load_workbook(file_path, read_only=True)
+                text_content = ""
+                
+                for sheet in wb.worksheets[:3]:  # 最大3シートまで
+                    for row in sheet.iter_rows(max_row=100):  # 最大100行まで
+                        row_text = " | ".join([str(cell.value) if cell.value else "" for cell in row])
+                        if row_text.strip():
+                            text_content += row_text + "\n"
+                
+                return text_content.strip()
+                
+        except ImportError as e:
+            logging.warning(f"[DRAFTER] Office library not installed: {e}")
+            return ""
+        except Exception as e:
+            logging.warning(f"[DRAFTER] Office file extraction failed: {e}")
+            return ""
+
     def _scrape_url_for_files(self, url: str, user_id: str) -> List[Tuple[str, str]]:
+
         """
         Scrape a specific URL for format files using Playwright.
         This is used when we have a verified URL from Observer.
@@ -403,13 +544,32 @@ class DrafterAgent:
         logging.info(f"[DRAFTER] Step 1: Researching format for '{grant_name}'")
         format_info, format_files = self._research_grant_format(grant_name, user_id, grant_url=grant_url)
         
-        # Step 2: Generate draft based on format
-        logging.info(f"[DRAFTER] Step 2: Generating format-aware draft")
+        # Step 2: Analyze downloaded format files with Gemini 3.0 Pro
+        format_analysis = ""
+        if format_files:
+            logging.info(f"[DRAFTER] Step 2: Analyzing {len(format_files)} format files with Gemini")
+            notifier.notify_sync(
+                ProgressStage.PROCESSING,
+                f"📋 [{grant_display_name}] 申請フォーマットを解析中..."
+            )
+            format_analysis = self._analyze_application_format(format_files, grant_name)
+            if format_analysis:
+                logging.info(f"[DRAFTER] Format analysis completed, length: {len(format_analysis)} chars")
+            else:
+                logging.info("[DRAFTER] Format analysis returned empty, using format_info only")
+        
+        # Step 3: Generate draft based on format and analysis
+        logging.info(f"[DRAFTER] Step 3: Generating format-aware draft")
         
         notifier.notify_sync(
             ProgressStage.PROCESSING,
             f"📝 [{grant_display_name}] ドラフトを生成中..."
         )
+        
+        # Combine format_info and format_analysis for comprehensive context
+        combined_format_info = format_info
+        if format_analysis:
+            combined_format_info += f"\n\n---\n\n# 申請フォーマット詳細解析結果\n{format_analysis}"
         
         full_prompt = f"""
 {self.system_prompt}
@@ -421,16 +581,17 @@ class DrafterAgent:
 {grant_info}
 
 # 申請書フォーマット情報
-{format_info}
+{combined_format_info}
 
 # タスク
-上記の申請書フォーマットに従って、各質問項目に対する回答を作成してください。
+上記の申請書フォーマット（特に「申請フォーマット詳細解析結果」の質問項目）に従って、各質問項目に対する回答を作成してください。
 
 **重要な指示:**
-1. フォーマット情報の質問項目ごとに見出しを付けて回答を作成
-2. 文字数制限がある場合はそれに収まるように調整
+1. 解析結果の質問項目一覧に記載された項目ごとに見出しを付けて回答を作成
+2. 文字数制限が明記されている場合はそれに収まるように調整
 3. Soul Profileの情報を最大限活用
 4. 各回答の後に簡単な📝記入のポイントを追記
+5. 審査で重視される点を意識して回答を作成
 
 **出力形式:**
 # [助成金名] 申請書ドラフト

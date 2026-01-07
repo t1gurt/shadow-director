@@ -291,8 +291,31 @@ class Orchestrator:
                 return response + f"❌ ドラフト作成エラー\n{message}"
         
         if intent == "OBSERVE":
-            # Manual Observer trigger
-            return self._run_observer(user_id)
+            # Manual Observer trigger - returns (report, strong_matches)
+            logging.info("[ORCH] OBSERVE intent - calling _run_observer...")
+            report, strong_matches = self._run_observer(user_id)
+            logging.info(f"[ORCH] _run_observer returned, strong_matches count: {len(strong_matches)}")
+            
+            if strong_matches:
+                # Add marker for caller to trigger draft processing AFTER sending report
+                # Use Base64 encoding to safely embed JSON in marker
+                import json
+                import base64
+                matches_data = [{
+                    'title': m['title'],
+                    'official_url': m.get('official_url', 'N/A'),
+                    'amount': m.get('amount', 'N/A'),
+                    'deadline_end': m.get('deadline_end', 'N/A'),
+                    'reason': m.get('reason', '')[:200],  # Truncate long reasons
+                    'resonance_score': m.get('resonance_score', 0)
+                } for m in strong_matches]
+                # Encode as base64 to avoid JSON parsing issues with special characters
+                matches_json = json.dumps(matches_data, ensure_ascii=False)
+                matches_b64 = base64.b64encode(matches_json.encode('utf-8')).decode('ascii')
+                report += f"\n[DRAFT_PENDING:{user_id}:{matches_b64}]"
+            
+            logging.info("[ORCH] OBSERVE intent - returning report")
+            return report
             
         # --- PR Agent Intents ---
         if intent == "PR_REMEMBER_SNS":
@@ -352,29 +375,40 @@ class Orchestrator:
             # Remove the marker from user-facing response
             interviewer_response = interviewer_response.replace("[INTERVIEW_COMPLETE]", "")
             # Auto-trigger Observer
-            observer_results = self._run_observer(user_id)
+            observer_results, _ = self._run_observer(user_id)
             return f"{interviewer_response}\n\n---\n\n【自動分析開始】\n{observer_results}"
         
         return interviewer_response
     
-    def _run_observer(self, user_id: str, message_callback=None) -> str:
+    def _run_observer(self, user_id: str, message_callback=None) -> tuple:
         """
         Runs the Observer and formats the output with next scheduled run info.
-        Auto-triggers Drafter for Strong Match opportunities (resonance score >= 70).
-        Filters out previously shown grants.
+        Returns report with slides and list of top matches for separate draft processing.
         
         Args:
             user_id: User/Channel ID
             message_callback: Optional async callback function to send messages immediately
                              Signature: async def callback(message: str, attachments: list = None)
+        
+        Returns:
+            tuple: (report_text: str, strong_matches: list)
+                - report_text: Observation report with slides and footer
+                - strong_matches: List of top match opportunities for draft processing
         """
         from datetime import datetime, timedelta
+        import logging
+        
+        logging.info(f"[ORCH] _run_observer started for user: {user_id}")
         
         # Get profile manager for grant history
+        logging.info("[ORCH] Initializing ProfileManager...")
         pm = ProfileManager(user_id=user_id)
+        logging.info("[ORCH] ProfileManager initialized")
         
         # Run Observer (returns text and parsed opportunities)
+        logging.info("[ORCH] Calling observer.observe()...")
         observer_text, opportunities = self.observer.observe(user_id)
+        logging.info(f"[ORCH] observer.observe() returned {len(opportunities)} opportunities")
         
         # Filter out already shown grants
         new_opportunities = []
@@ -426,105 +460,12 @@ class Orchestrator:
                 except Exception as e:
                     logging.error(f"[ORCH] Slide generation failed for {grant_title}: {e}")
         
-        # Auto-trigger Drafter for Top Match only - process the single highest scoring grant
-        if strong_matches:
-            result += f"\n\n---\n\n【🎯 Top Match検出！自動ドラフト生成開始】\n"
-            result += f"\n共鳴度90以上の案件から、最も共鳴度が高い1件を自動処理します。\n"
-            result += "助成金の詳細を調査し、ドラフトを作成します...\n"
-            
-            # Process each grant SEQUENTIALLY with immediate message sending
-            for i, opp in enumerate(strong_matches, 1):
-                grant_title = opp['title']
-                grant_url = opp.get('official_url', 'N/A')
-                grant_result = f"\n\n---\n\n## 🔍 助成金 {i}/{len(strong_matches)}: {grant_title}\n"
-                grant_result += f"**(共鳴度: {opp['resonance_score']})**\n\n"
-                
-                # Slide already generated above, skip it here
-                
-                # Step 1: Get detailed grant information
-                grant_result += "**Step 1: 助成金詳細を調査中...**\n"
-                grant_details = ""
-                format_files = []
-                try:
-                    logging.info(f"[ORCH] Getting details for: {grant_title}")
-                    # Use Drafter's research function to get grant format info
-                    grant_details, format_files = self.drafter._research_grant_format(
-                        grant_title, user_id, grant_url=grant_url
-                    )
-                    
-                    if grant_details:
-                        # Summarize the key details
-                        grant_result += f"📋 詳細取得完了\n"
-                        # Add key info from details (truncated for display)
-                        detail_summary = grant_details[:500] + "..." if len(grant_details) > 500 else grant_details
-                        grant_result += f"\n```\n{detail_summary}\n```\n"
-                    else:
-                        grant_result += "ℹ️ 詳細情報は基本情報のみ\n"
-                except Exception as e:
-                    logging.error(f"[ORCH] Grant details fetch failed: {e}")
-                    grant_result += f"⚠️ 詳細取得スキップ（基本情報で続行）\n"
-                
-                # Add format file markers if found during research
-                if format_files:
-                    grant_result += "📎 申請フォーマットファイル:\n"
-                    for file_path, file_name in format_files:
-                        grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
-                
-                # Step 2: Create draft for this grant using collected information
-                grant_result += "\n**Step 2: ドラフト作成中...**\n"
-                
-                # Format grant information for Drafter with detailed info
-                grant_info = f"""助成金名: {opp['title']}
-URL: {grant_url}
-金額: {opp.get('amount', 'N/A')}
-締切: {opp.get('deadline_end', 'N/A')}
-共鳴理由: {opp['reason']}
-
-【詳細情報】
-{grant_details if grant_details else '詳細情報なし'}
-
-この助成金の申請書ドラフトを作成してください。"""
-                
-                try:
-                    logging.info(f"[ORCH] Auto-triggering Drafter for: {grant_title}")
-                    message, content, filename, draft_format_files = self.drafter.create_draft(user_id, grant_info)
-                    
-                    # Add any additional format files found during draft creation
-                    if draft_format_files and not format_files:
-                        grant_result += "📎 申請フォーマットファイル:\n"
-                        for file_path, file_name in draft_format_files:
-                            grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
-                    elif not format_files and not draft_format_files:
-                        grant_result += "ℹ️ 申請フォーマットファイルは見つかりませんでした。\n"
-                    
-                    if content:
-                        grant_result += f"✅ ドラフト作成完了\n[ATTACHMENT_NEEDED:{user_id}:{filename}]\n"
-                    else:
-                        grant_result += f"⚠️ ドラフト作成エラー: {message}\n"
-                except Exception as e:
-                    logging.error(f"[ORCH] Drafter auto-trigger failed for {grant_title}: {e}")
-                    grant_result += f"⚠️ ドラフト作成エラー: {str(e)}\n"
-                
-                grant_result += f"\n✨ **{grant_title}** の処理完了\n"
-                
-                # Immediately send this grant's result to Discord via callback
-                if message_callback:
-                    try:
-                        import asyncio
-                        # If callback is async, run it
-                        if asyncio.iscoroutinefunction(message_callback):
-                            asyncio.create_task(message_callback(grant_result))
-                        else:
-                            message_callback(grant_result)
-                    except Exception as e:
-                        logging.error(f"[ORCH] Message callback failed: {e}")
-                        # Fall back to accumulating result
-                        result += grant_result
-                else:
-                    # No callback, accumulate results
-                    result += grant_result
-                    
-        else:
+        
+        # Note: Draft processing has been moved to _process_top_match_drafts method
+        # _run_observer now only returns report and strong_matches for separate processing
+        
+        # If no strong matches, show list of grants below 90
+        if not strong_matches:
             result += "\n\n💡 今回は共鳴度90以上の Top Match は見つかりませんでした。"
             
             # Show list of grants below 90 with their resonance scores
@@ -550,7 +491,125 @@ URL: {grant_url}
         
         footer = f"\n\n📅 **次回の自動観察予定**: {next_run_str}\n（手動で観察を実行したい場合は「助成金を探して」と送信してください）"
         
-        return result + footer
+        # Return report and strong_matches for caller to process sequentially
+        return (result + footer, strong_matches)
+
+    def _process_top_match_drafts(self, user_id: str, strong_matches: list, message_callback=None) -> str:
+        """
+        Process draft creation for top match opportunities.
+        Called AFTER report and slides have been sent to Discord.
+        
+        Args:
+            user_id: User/Channel ID
+            strong_matches: List of opportunity dicts with score >= 90
+            message_callback: Optional callback to send messages immediately
+        
+        Returns:
+            Combined results text (or empty if using callback)
+        """
+        result = ""
+        
+        # Initial notification
+        start_msg = f"\n\n---\n\n【🎯 Top Match検出！自動ドラフト生成開始】\n"
+        start_msg += f"\n共鳴度90以上の案件から、最も共鳴度が高い1件を自動処理します。\n"
+        start_msg += "助成金の詳細を調査し、ドラフトを作成します...\n"
+        
+        if message_callback:
+            try:
+                import asyncio
+                if asyncio.iscoroutinefunction(message_callback):
+                    asyncio.create_task(message_callback(start_msg))
+                else:
+                    message_callback(start_msg)
+            except Exception as e:
+                logging.error(f"[ORCH] Message callback failed: {e}")
+                result += start_msg
+        else:
+            result += start_msg
+        
+        # Process each grant
+        for i, opp in enumerate(strong_matches, 1):
+            grant_title = opp['title']
+            grant_url = opp.get('official_url', 'N/A')
+            grant_result = f"\n\n---\n\n## 🔍 助成金 {i}/{len(strong_matches)}: {grant_title}\n"
+            grant_result += f"**(共鳴度: {opp['resonance_score']})**\n\n"
+            
+            # Step 1: Get detailed grant information
+            grant_result += "**Step 1: 助成金詳細を調査中...**\n"
+            grant_details = ""
+            format_files = []
+            try:
+                logging.info(f"[ORCH] Getting details for: {grant_title}")
+                grant_details, format_files = self.drafter._research_grant_format(
+                    grant_title, user_id, grant_url=grant_url
+                )
+                
+                if grant_details:
+                    grant_result += f"📋 詳細取得完了\n"
+                    detail_summary = grant_details[:500] + "..." if len(grant_details) > 500 else grant_details
+                    grant_result += f"\n```\n{detail_summary}\n```\n"
+                else:
+                    grant_result += "ℹ️ 詳細情報は基本情報のみ\n"
+            except Exception as e:
+                logging.error(f"[ORCH] Grant details fetch failed: {e}")
+                grant_result += f"⚠️ 詳細取得スキップ（基本情報で続行）\n"
+            
+            # Add format file markers
+            if format_files:
+                grant_result += "📎 申請フォーマットファイル:\n"
+                for file_path, file_name in format_files:
+                    grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+            
+            # Step 2: Create draft
+            grant_result += "\n**Step 2: ドラフト作成中...**\n"
+            
+            grant_info = f"""助成金名: {opp['title']}
+URL: {grant_url}
+金額: {opp.get('amount', 'N/A')}
+締切: {opp.get('deadline_end', 'N/A')}
+共鳴理由: {opp['reason']}
+
+【詳細情報】
+{grant_details if grant_details else '詳細情報なし'}
+
+この助成金の申請書ドラフトを作成してください。"""
+            
+            try:
+                logging.info(f"[ORCH] Auto-triggering Drafter for: {grant_title}")
+                message, content, filename, draft_format_files = self.drafter.create_draft(user_id, grant_info)
+                
+                if draft_format_files and not format_files:
+                    grant_result += "📎 申請フォーマットファイル:\n"
+                    for file_path, file_name in draft_format_files:
+                        grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+                elif not format_files and not draft_format_files:
+                    grant_result += "ℹ️ 申請フォーマットファイルは見つかりませんでした。\n"
+                
+                if content:
+                    grant_result += f"✅ ドラフト作成完了\n[ATTACHMENT_NEEDED:{user_id}:{filename}]\n"
+                else:
+                    grant_result += f"⚠️ ドラフト作成エラー: {message}\n"
+            except Exception as e:
+                logging.error(f"[ORCH] Drafter auto-trigger failed for {grant_title}: {e}")
+                grant_result += f"⚠️ ドラフト作成エラー: {str(e)}\n"
+            
+            grant_result += f"\n✨ **{grant_title}** の処理完了\n"
+            
+            # Send or accumulate result
+            if message_callback:
+                try:
+                    import asyncio
+                    if asyncio.iscoroutinefunction(message_callback):
+                        asyncio.create_task(message_callback(grant_result))
+                    else:
+                        message_callback(grant_result)
+                except Exception as e:
+                    logging.error(f"[ORCH] Message callback failed: {e}")
+                    result += grant_result
+            else:
+                result += grant_result
+        
+        return result
 
     def _handle_view_drafts(self, user_message: str, user_id: str) -> str:
         """

@@ -394,6 +394,34 @@ async def on_message(message):
                      await message.channel.send(response, file=file_to_send)
                      return
 
+            # Check for DRAFT_PENDING marker (for sequential draft processing)
+            draft_pending_data = None
+            if "[DRAFT_PENDING:" in response:
+                import re
+                import json
+                import base64
+                
+                # Extract marker info (Base64 encoded JSON)
+                match = re.search(r'\[DRAFT_PENDING:([^:]+):([A-Za-z0-9+/=]+)\]', response)
+                if match:
+                    pending_user_id = match.group(1)
+                    matches_b64 = match.group(2)
+                    logging.info(f"[DRAFT_PENDING] Found marker for user {pending_user_id}")
+                    
+                    # Remove marker from response
+                    response = response.replace(match.group(0), '').strip()
+                    
+                    # Decode Base64 and parse JSON
+                    try:
+                        matches_json = base64.b64decode(matches_b64).decode('utf-8')
+                        draft_pending_data = {
+                            'user_id': pending_user_id,
+                            'strong_matches': json.loads(matches_json)
+                        }
+                        logging.info(f"[DRAFT_PENDING] Parsed {len(draft_pending_data['strong_matches'])} matches")
+                    except (json.JSONDecodeError, base64.binascii.Error, UnicodeDecodeError) as e:
+                        logging.error(f"[DRAFT_PENDING] Failed to parse matches data: {e}")
+            
             # Handle long messages (Discord 2000 char limit)
             MAX_LENGTH = 2000
             if len(response) > MAX_LENGTH:
@@ -421,6 +449,169 @@ async def on_message(message):
                         await message.channel.send(f"(...続き {i+1}/{len(chunks)})\n{chunk}")
             else:
                 await message.channel.send(response)
+            
+            # Process pending drafts AFTER report and slides are sent
+            if draft_pending_data and orchestrator:
+                logging.info(f"[DRAFT_PENDING] Starting async draft processing")
+                
+                # Define progress callback that handles file markers
+                async def progress_callback(msg):
+                    """Async callback to send messages and process file markers during draft processing."""
+                    import re
+                    import io
+                    
+                    if not msg:
+                        return
+                    
+                    # Process FORMAT_FILE_NEEDED markers
+                    if "[FORMAT_FILE_NEEDED:" in msg:
+                        format_matches = re.findall(r'\[FORMAT_FILE_NEEDED:([^:]+):([^\]]+)\]', msg)
+                        for uid, file_path in format_matches:
+                            msg = msg.replace(f"[FORMAT_FILE_NEEDED:{uid}:{file_path}]", '').strip()
+                            try:
+                                if os.path.exists(file_path):
+                                    file_size = os.path.getsize(file_path)
+                                    if file_size <= 25 * 1024 * 1024:
+                                        filename = os.path.basename(file_path)
+                                        discord_file = discord.File(file_path, filename=filename)
+                                        await message.channel.send(file=discord_file)
+                                        logging.info(f"[PROGRESS_CB] Sent format file: {filename}")
+                                        try:
+                                            os.remove(file_path)
+                                        except:
+                                            pass
+                            except Exception as e:
+                                logging.error(f"[PROGRESS_CB] Format file error: {e}")
+                    
+                    # Process ATTACHMENT_NEEDED markers
+                    if "[ATTACHMENT_NEEDED:" in msg:
+                        attachment_matches = re.findall(r'\[ATTACHMENT_NEEDED:([^:]+):([^\]]+)\]', msg)
+                        for uid, filename_hint in attachment_matches:
+                            msg = msg.replace(f"[ATTACHMENT_NEEDED:{uid}:{filename_hint}]", '').strip()
+                            try:
+                                draft_content = None
+                                if filename_hint == "latest":
+                                    _, draft_content = orchestrator.drafter.get_latest_draft(uid)
+                                    drafts = orchestrator.drafter.docs_tool.list_drafts(uid)
+                                    filename = sorted(drafts)[-1] if drafts else "draft.md"
+                                else:
+                                    draft_content = orchestrator.drafter.docs_tool.get_draft(uid, filename_hint)
+                                    filename = filename_hint
+                                
+                                if draft_content:
+                                    file_bytes = io.BytesIO(draft_content.encode('utf-8'))
+                                    discord_file = discord.File(file_bytes, filename=filename)
+                                    await message.channel.send(file=discord_file)
+                                    logging.info(f"[PROGRESS_CB] Sent draft file: {filename}")
+                            except Exception as e:
+                                logging.error(f"[PROGRESS_CB] Attachment error: {e}")
+                    
+                    # Send remaining text (handle Discord 2000 char limit)
+                    if msg.strip():
+                        MAX_LEN = 2000
+                        if len(msg) > MAX_LEN:
+                            chunks = []
+                            while msg:
+                                if len(msg) <= MAX_LEN:
+                                    chunks.append(msg)
+                                    break
+                                split_pos = msg.rfind('\n', 0, MAX_LEN)
+                                if split_pos == -1:
+                                    split_pos = msg.rfind(' ', 0, MAX_LEN)
+                                if split_pos == -1:
+                                    split_pos = MAX_LEN
+                                chunks.append(msg[:split_pos])
+                                msg = msg[split_pos:].lstrip()
+                            for chunk in chunks:
+                                await message.channel.send(chunk)
+                        else:
+                            await message.channel.send(msg)
+                
+                try:
+                    # Run draft processing in a separate thread
+                    # Pass None as callback to accumulate all results in return value
+                    # This ensures file markers are properly processed after the function returns
+                    draft_result = await asyncio.to_thread(
+                        orchestrator._process_top_match_drafts,
+                        draft_pending_data['user_id'],
+                        draft_pending_data['strong_matches'],
+                        None  # Don't use async callback from sync thread - process results after return
+                    )
+                    
+                    # Process any markers in draft result (images, attachments, etc.)
+                    if draft_result:
+                        # Handle FORMAT_FILE_NEEDED markers
+                        if "[FORMAT_FILE_NEEDED:" in draft_result:
+                            import re
+                            import io
+                            
+                            format_file_matches = re.findall(r'\[FORMAT_FILE_NEEDED:([^:]+):([^\]]+)\]', draft_result)
+                            for user_id_f, file_path in format_file_matches:
+                                draft_result = draft_result.replace(f"[FORMAT_FILE_NEEDED:{user_id_f}:{file_path}]", '').strip()
+                                try:
+                                    if os.path.exists(file_path):
+                                        file_size = os.path.getsize(file_path)
+                                        if file_size <= 25 * 1024 * 1024:
+                                            filename = os.path.basename(file_path)
+                                            discord_file = discord.File(file_path, filename=filename)
+                                            await message.channel.send(file=discord_file)
+                                            try:
+                                                os.remove(file_path)
+                                            except:
+                                                pass
+                                except Exception as e:
+                                    logging.error(f"[DRAFT_PENDING] Format file error: {e}")
+                        
+                        # Handle ATTACHMENT_NEEDED markers
+                        if "[ATTACHMENT_NEEDED:" in draft_result:
+                            import re
+                            import io
+                            
+                            attachment_matches = re.findall(r'\[ATTACHMENT_NEEDED:([^:]+):([^\]]+)\]', draft_result)
+                            for user_id_a, filename_hint in attachment_matches:
+                                draft_result = draft_result.replace(f"[ATTACHMENT_NEEDED:{user_id_a}:{filename_hint}]", '').strip()
+                                try:
+                                    draft_content = None
+                                    if filename_hint == "latest":
+                                        _, draft_content = orchestrator.drafter.get_latest_draft(user_id_a)
+                                        drafts = orchestrator.drafter.docs_tool.list_drafts(user_id_a)
+                                        filename = sorted(drafts)[-1] if drafts else "draft.md"
+                                    else:
+                                        draft_content = orchestrator.drafter.docs_tool.get_draft(user_id_a, filename_hint)
+                                        filename = filename_hint
+                                    
+                                    if draft_content:
+                                        file_bytes = io.BytesIO(draft_content.encode('utf-8'))
+                                        discord_file = discord.File(file_bytes, filename=filename)
+                                        await message.channel.send(file=discord_file)
+                                except Exception as e:
+                                    logging.error(f"[DRAFT_PENDING] Attachment error: {e}")
+                        
+                        # Send remaining text if any
+                        if draft_result.strip():
+                            MAX_LENGTH = 2000
+                            if len(draft_result) > MAX_LENGTH:
+                                chunks = []
+                                temp = draft_result
+                                while temp:
+                                    if len(temp) <= MAX_LENGTH:
+                                        chunks.append(temp)
+                                        break
+                                    split_pos = temp.rfind('\n', 0, MAX_LENGTH)
+                                    if split_pos == -1:
+                                        split_pos = temp.rfind(' ', 0, MAX_LENGTH)
+                                    if split_pos == -1:
+                                        split_pos = MAX_LENGTH
+                                    chunks.append(temp[:split_pos])
+                                    temp = temp[split_pos:].lstrip()
+                                for chunk in chunks:
+                                    await message.channel.send(chunk)
+                            else:
+                                await message.channel.send(draft_result)
+                                
+                except Exception as e:
+                    logging.error(f"[DRAFT_PENDING] Draft processing failed: {e}", exc_info=True)
+                    await message.channel.send(f"⚠️ ドラフト処理中にエラーが発生しました: {e}")
                 
         except Exception as e:
             logging.error(f"Error processing message: {e}")
