@@ -39,9 +39,9 @@ COPY . .
 # Install dependencies defined in pyproject.toml
 RUN pip install --no-cache-dir .
 
-# Install Playwright browsers to shared location (before user switch)
+# Install Playwright browsers with all dependencies to shared location
 RUN mkdir -p $PLAYWRIGHT_BROWSERS_PATH && \
-    playwright install chromium && \
+    playwright install chromium --with-deps && \
     chmod -R 755 $PLAYWRIGHT_BROWSERS_PATH
 
 # Create a non-root user and switch to it (Security Best Practice)

@@ -7,6 +7,8 @@ from src.tools.gdocs_tool import GoogleDocsTool
 from src.memory.profile_manager import ProfileManager
 from src.tools.file_downloader import FileDownloader
 from src.logic.grant_page_scraper import GrantPageScraper
+from src.logic.format_field_mapper import FormatFieldMapper
+from src.tools.document_filler import DocumentFiller
 
 class DrafterAgent:
     def __init__(self):
@@ -36,6 +38,13 @@ class DrafterAgent:
             model_name=self.model_name,
             timeout=10000  # 10 seconds timeout for Playwright operations
         )
+        
+        # Initialize format field mapper and document filler
+        self.format_mapper = FormatFieldMapper(
+            gemini_client=self.client,
+            model_name=self.model_name
+        )
+        self.document_filler = DocumentFiller()
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -657,14 +666,71 @@ class DrafterAgent:
             
             message = f"ドラフトを作成しました: {file_path}"
             
+            # Step 4: Fill format files with draft content
+            filled_files = []
+            if format_files:
+                logging.info(f"[DRAFTER] Step 4: Attempting to fill {len(format_files)} format files")
+                notifier.notify_sync(
+                    ProgressStage.PROCESSING,
+                    f"📝 [{grant_display_name}] フォーマットに入力中..."
+                )
+                
+                for file_path_orig, file_name_orig in format_files:
+                    try:
+                        # Only process Excel/Word files
+                        ext = os.path.splitext(file_name_orig)[1].lower()
+                        if ext not in ['.xlsx', '.xlsm', '.xls', '.docx', '.doc']:
+                            logging.info(f"[DRAFTER] Skipping non-fillable file: {file_name_orig}")
+                            continue
+                        
+                        # Analyze format fields
+                        fields, file_type = self.format_mapper.analyze_format_file(file_path_orig)
+                        
+                        if not fields:
+                            logging.info(f"[DRAFTER] No fillable fields found in: {file_name_orig}")
+                            continue
+                        
+                        logging.info(f"[DRAFTER] Found {len(fields)} fields in {file_name_orig}")
+                        
+                        # Map draft content to fields
+                        field_values = self.format_mapper.map_draft_to_fields(
+                            fields, 
+                            draft_content, 
+                            grant_name
+                        )
+                        
+                        if not field_values:
+                            logging.info(f"[DRAFTER] Could not map draft to fields in: {file_name_orig}")
+                            continue
+                        
+                        # Fill the document
+                        filled_path, fill_message = self.document_filler.fill_document(
+                            file_path_orig,
+                            field_values,
+                            user_id
+                        )
+                        
+                        if filled_path:
+                            filled_filename = os.path.basename(filled_path)
+                            filled_files.append((filled_path, filled_filename))
+                            logging.info(f"[DRAFTER] Successfully filled: {filled_filename}")
+                        else:
+                            logging.warning(f"[DRAFTER] Fill failed for {file_name_orig}: {fill_message}")
+                            
+                    except Exception as fill_error:
+                        logging.warning(f"[DRAFTER] Error filling {file_name_orig}: {fill_error}")
+                
+                if filled_files:
+                    message += f"\n📋 {len(filled_files)}件のフォーマットに入力しました"
+            
             # Completion notification
             notifier.notify_sync(
                 ProgressStage.COMPLETED,
                 f"✅ [{grant_display_name}] ドラフト作成完了！"
             )
             
-            logging.info(f"[DRAFTER] create_draft completed successfully")
-            return (message, draft_content, filename, format_files)
+            logging.info(f"[DRAFTER] create_draft completed successfully, filled_files: {len(filled_files)}")
+            return (message, draft_content, filename, format_files, filled_files)
             
         except Exception as e:
             logging.error(f"[DRAFTER] Error in create_draft: {e}", exc_info=True)
@@ -676,7 +742,7 @@ class DrafterAgent:
             )
             
             error_msg = f"ドラフト作成エラー: {e}"
-            return (error_msg, "", "", [])
+            return (error_msg, "", "", [], [])
 
 
     def list_drafts(self, user_id: str) -> str:

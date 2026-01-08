@@ -319,6 +319,60 @@ async def on_message(message):
                             except Exception as del_err:
                                 logging.error(f"[FORMAT_FILE] Failed to clean up file after error: {del_err}")
             
+            # Check for filled file marker (for auto-filled application format files)
+            if "[FILLED_FILE_NEEDED:" in response:
+                import re
+                import io
+                import os
+                
+                # Extract ALL filled file markers
+                filled_file_matches = re.findall(r'\[FILLED_FILE_NEEDED:([^:]+):([^\]]+)\]', response)
+                
+                if filled_file_matches:
+                    logging.info(f"[FILLED_FILE] Found {len(filled_file_matches)} filled file markers")
+                    
+                    # Remove all markers from response
+                    for match in re.finditer(r'\[FILLED_FILE_NEEDED:([^:]+):([^\]]+)\]', response):
+                        response = response.replace(match.group(0), '').strip()
+                    
+                    # Process each filled file
+                    for user_id, file_path in filled_file_matches:
+                        try:
+                            logging.info(f"[FILLED_FILE] Processing: User={user_id}, Path={file_path}")
+                            
+                            # Check if file exists and send
+                            if os.path.exists(file_path):
+                                file_size = os.path.getsize(file_path)
+                                logging.info(f"[FILLED_FILE] File size: {file_size} bytes")
+                                
+                                # Check Discord limit (25MB)
+                                if file_size > 25 * 1024 * 1024:
+                                    await message.channel.send(f"⚠️ 記入済みファイルが大きすぎます ({file_size / 1024 / 1024:.1f}MB)")
+                                    try:
+                                        os.remove(file_path)
+                                        logging.info(f"[FILLED_FILE] Deleted oversized file: {file_path}")
+                                    except Exception as del_err:
+                                        logging.error(f"[FILLED_FILE] Failed to delete oversized file: {del_err}")
+                                else:
+                                    filename = os.path.basename(file_path)
+                                    discord_file = discord.File(file_path, filename=filename)
+                                    await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
+                                    logging.info(f"[FILLED_FILE] File sent: {filename}")
+                                    
+                                    # Delete file after successful send
+                                    try:
+                                        os.remove(file_path)
+                                        logging.info(f"[FILLED_FILE] Deleted file after send: {file_path}")
+                                    except Exception as del_err:
+                                        logging.error(f"[FILLED_FILE] Failed to delete file after send: {del_err}")
+                                    
+                            else:
+                                logging.error(f"[FILLED_FILE] File not found: {file_path}")
+                                await message.channel.send(f"⚠️ 記入済みファイルが見つかりませんでした")
+                        except Exception as e:
+                            logging.error(f"[FILLED_FILE] Error processing {file_path}: {e}", exc_info=True)
+                            await message.channel.send(f"⚠️ 記入済みファイル送信エラー: {e}")
+            
             # Check for attachment marker (for draft viewing)
             if "[ATTACHMENT_NEEDED:" in response:
                 import re
@@ -561,6 +615,27 @@ async def on_message(message):
                                                 pass
                                 except Exception as e:
                                     logging.error(f"[DRAFT_PENDING] Format file error: {e}")
+                        
+                        # Handle FILLED_FILE_NEEDED markers
+                        if "[FILLED_FILE_NEEDED:" in draft_result:
+                            import re
+                            
+                            filled_file_matches = re.findall(r'\[FILLED_FILE_NEEDED:([^:]+):([^\]]+)\]', draft_result)
+                            for user_id_filled, file_path in filled_file_matches:
+                                draft_result = draft_result.replace(f"[FILLED_FILE_NEEDED:{user_id_filled}:{file_path}]", '').strip()
+                                try:
+                                    if os.path.exists(file_path):
+                                        file_size = os.path.getsize(file_path)
+                                        if file_size <= 25 * 1024 * 1024:
+                                            filename = os.path.basename(file_path)
+                                            discord_file = discord.File(file_path, filename=filename)
+                                            await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
+                                            try:
+                                                os.remove(file_path)
+                                            except:
+                                                pass
+                                except Exception as e:
+                                    logging.error(f"[DRAFT_PENDING] Filled file error: {e}")
                         
                         # Handle ATTACHMENT_NEEDED markers
                         if "[ATTACHMENT_NEEDED:" in draft_result:

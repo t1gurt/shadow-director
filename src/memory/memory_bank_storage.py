@@ -1,27 +1,30 @@
 """
 Vertex AI Memory Bank Storage Backend
 Uses Vertex AI Agent Engine Memory Bank for persistent memory storage.
+
+Updated to use client-based API per migration guide:
+https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations/agent-engine-migration
 """
 
 import os
 import json
 import logging
 from typing import Dict, Any, List, Optional
-from abc import ABC, abstractmethod
 
 try:
     import vertexai
-    from google.cloud import aiplatform
     MEMORY_BANK_AVAILABLE = True
 except ImportError:
     MEMORY_BANK_AVAILABLE = False
-    logging.warning("[MEMORY_BANK] vertexai and google-cloud-aiplatform not available for Memory Bank")
+    logging.warning("[MEMORY_BANK] vertexai not available for Memory Bank")
 
 
 class MemoryBankStorage:
     """
     Stores memories using Vertex AI Agent Engine Memory Bank.
     Data is organized by channel_id (scope) for team collaboration.
+    
+    Uses the new client-based API (vertexai.Client).
     """
     
     def __init__(self, project_id: str = None, location: str = "us-central1", agent_engine_id: str = None):
@@ -34,14 +37,14 @@ class MemoryBankStorage:
             agent_engine_id: Optional explicit Agent Engine ID
         """
         if not MEMORY_BANK_AVAILABLE:
-            raise ImportError("vertexai and google-cloud-aiplatform are required for MemoryBankStorage")
+            raise ImportError("vertexai is required for MemoryBankStorage")
         
         self.project_id = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
         self.location = location
         self.agent_engine_id_override = agent_engine_id or os.environ.get("GOOGLE_CLOUD_AGENT_ENGINE_ID")
         
-        # Initialize new Vertex AI Client (as per official documentation)
-        # https://cloud.google.com/vertex-ai/generative-ai/docs/agent-engine/memory-bank/set-up
+        # Initialize new Vertex AI Client (client-based API)
+        # https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations/agent-engine-migration
         self.client = vertexai.Client(
             project=self.project_id,
             location=self.location
@@ -79,10 +82,15 @@ class MemoryBankStorage:
             
             # Look for existing Shadow Director engine
             for engine in engines:
-                display_name = getattr(engine.api_resource, 'display_name', '')
+                # Access display_name from the engine object
+                display_name = getattr(engine, 'display_name', '') or ''
+                if not display_name and hasattr(engine, 'api_resource'):
+                    display_name = getattr(engine.api_resource, 'display_name', '') or ''
+                
                 if "shadow-director" in display_name.lower():
-                    logging.info(f"[MEMORY_BANK] Found existing Agent Engine: {engine.api_resource.name}")
-                    return engine.api_resource.name
+                    engine_name = getattr(engine, 'name', '') or getattr(engine.api_resource, 'name', '')
+                    logging.info(f"[MEMORY_BANK] Found existing Agent Engine: {engine_name}")
+                    return engine_name
             
             # Create new Agent Engine for Memory Bank
             return self._create_agent_engine()
@@ -94,27 +102,30 @@ class MemoryBankStorage:
     def _create_agent_engine(self) -> str:
         """
         Create a new Agent Engine instance with Memory Bank configuration.
-        Uses the new vertexai.Client().agent_engines.create() API.
+        Uses the new client-based API.
         
         Returns:
             Agent Engine resource name
         """
         try:
-            # Create Agent Engine using new API (per official documentation)
-            # https://cloud.google.com/vertex-ai/generative-ai/docs/agent-engine/memory-bank/set-up
-            # For Memory Bank without runtime, just call create() without agent
+            # Create Agent Engine using new client-based API
+            # https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations/agent-engine-migration
+            # Format: client.agent_engines.create(agent=None, config={...})
             agent_engine = self.client.agent_engines.create(
-                display_name="shadow-director-memory-bank",
+                agent=None,  # No agent for memory-only engine
                 config={
+                    "display_name": "shadow-director-memory-bank",
+                    "description": "Memory Bank for Shadow Director NPO assistant",
                     "context_spec": {
                         "memory_bank_config": {
-                            # Default memory bank configuration
+                            # Default memory bank configuration - automatic memory generation
                         }
                     }
                 }
             )
             
-            name = agent_engine.api_resource.name
+            # Get the resource name
+            name = getattr(agent_engine, 'name', '') or getattr(agent_engine.api_resource, 'name', '')
             logging.info(f"[MEMORY_BANK] Created new Agent Engine: {name}")
             return name
             

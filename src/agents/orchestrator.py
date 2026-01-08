@@ -186,6 +186,53 @@ class Orchestrator:
 """
 
 
+    def _classify_format_file(self, filename: str) -> str:
+        """
+        ファイル名からファイルの用途を判定する。
+        
+        Args:
+            filename: ファイル名
+            
+        Returns:
+            ファイルの用途を示す文字列
+        """
+        fn_lower = filename.lower()
+        
+        # 募集要項・公募要領系（最優先で判定）
+        if any(kw in fn_lower for kw in ['募集要項', '公募要領', '応募要項', '公募要項', '募集案内', '公募案内']):
+            return "📋 募集要項（応募条件・審査基準が記載）"
+        
+        # 交付要綱・規程系
+        if any(kw in fn_lower for kw in ['交付要綱', '交付規程', '実施要領', 'ガイドライン', 'guideline', '手引き', '手引']):
+            return "📜 交付要綱・ガイドライン（ルール・規程）"
+        
+        # 記入例系（申請書より先に判定）
+        if any(kw in fn_lower for kw in ['記入例', '記載例', '作成例', 'サンプル', 'sample', '見本', '例']):
+            return "📖 記入例・サンプル（参考資料）"
+        
+        # 申請書・様式系
+        if any(kw in fn_lower for kw in ['申請書', '応募書', '様式', 'フォーマット', 'テンプレート', 'template', 'form', '届出', '調書']):
+            return "📝 申請書フォーマット（記入が必要）"
+        
+        # 予算書系
+        if any(kw in fn_lower for kw in ['予算', '収支', '経費', 'budget', '見積']):
+            return "💰 予算書（金額記入が必要）"
+        
+        # 報告書系
+        if any(kw in fn_lower for kw in ['報告', 'report', '実績']):
+            return "📊 報告書フォーマット"
+        
+        # 事業計画系
+        if any(kw in fn_lower for kw in ['計画', '事業', 'plan', 'project']):
+            return "📋 事業計画書"
+        
+        # チェックリスト系
+        if any(kw in fn_lower for kw in ['チェック', 'check', '確認', 'リスト']):
+            return "✅ チェックリスト"
+        
+        # 判定できない場合はファイル名から推測
+        return "📄 関連資料"
+
     def route_message(self, user_message: str, user_id: str, attachments=None, **kwargs) -> str:
         """
         Routes the message based on intent.
@@ -269,22 +316,43 @@ class Orchestrator:
 
         if intent == "DRAFT":
             # Create draft and automatically attach file
-            message, content, filename, format_files = self.drafter.create_draft(user_id, user_message)
+            message, content, filename, format_files, filled_files = self.drafter.create_draft(user_id, user_message)
             
             # Build response with format files first, then draft
             response = ""
             if format_files:
-                response += "📎 **申請フォーマットファイル** が見つかりました:\n"
+                response += "📎 **申請フォーマットファイル** が見つかりました:\n\n"
+                response += "📑 **ファイル一覧**:\n"
+                for file_path, file_name in format_files:
+                    file_type = self._classify_format_file(file_name)
+                    response += f"  • `{file_name}` → {file_type}\n"
+                response += "\n"
                 for file_path, file_name in format_files:
                     response += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
                 response += "\n"
+                
+                # Word/Excel入力試行結果を通知
+                fillable_count = sum(1 for _, fn in format_files if fn.lower().endswith(('.xlsx', '.xls', '.docx', '.doc')))
+                if fillable_count > 0:
+                    if filled_files:
+                        response += f"✅ **自動入力**: {len(filled_files)}件のWord/Excelファイルにドラフト内容を入力しました\n\n"
+                    else:
+                        response += f"ℹ️ **自動入力**: Word/Excelファイル（{fillable_count}件）への入力を試みましたが、入力可能なフィールドが検出できませんでした。マークダウン形式のドラフトをご利用ください。\n\n"
+                
             else:
                 # Notify user that no format files were found
                 response += "ℹ️ 申請フォーマットファイルは見つかりませんでした。一般的な申請書形式でドラフトを作成しました。\n\n"
             
+            # Add filled files if any
+            if filled_files:
+                response += "📋 **記入済みフォーマット** を作成しました:\n"
+                for file_path, file_name in filled_files:
+                    response += f"[FILLED_FILE_NEEDED:{user_id}:{file_path}]\n"
+                response += "\n"
+            
             if content:
                 # Success: send minimal message with attachment marker
-                response += f"✅ ドラフト作成完了\n📄 ファイルとして送信します...\n[ATTACHMENT_NEEDED:{user_id}:{filename}]"
+                response += f"✅ ドラフト作成完了\n📄 マークダウン形式のドラフトも送信します...\n[ATTACHMENT_NEEDED:{user_id}:{filename}]"
                 return response
             else:
                 # Error occurred
@@ -576,14 +644,25 @@ URL: {grant_url}
             
             try:
                 logging.info(f"[ORCH] Auto-triggering Drafter for: {grant_title}")
-                message, content, filename, draft_format_files = self.drafter.create_draft(user_id, grant_info)
+                message, content, filename, draft_format_files, filled_files = self.drafter.create_draft(user_id, grant_info)
                 
                 if draft_format_files and not format_files:
                     grant_result += "📎 申請フォーマットファイル:\n"
+                    grant_result += "📑 ファイル一覧:\n"
+                    for file_path, file_name in draft_format_files:
+                        file_type = self._classify_format_file(file_name)
+                        grant_result += f"  • `{file_name}` → {file_type}\n"
+                    grant_result += "\n"
                     for file_path, file_name in draft_format_files:
                         grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
                 elif not format_files and not draft_format_files:
                     grant_result += "ℹ️ 申請フォーマットファイルは見つかりませんでした。\n"
+                
+                # Add filled files if any
+                if filled_files:
+                    grant_result += "📋 記入済みフォーマット:\n"
+                    for file_path, file_name in filled_files:
+                        grant_result += f"[FILLED_FILE_NEEDED:{user_id}:{file_path}]\n"
                 
                 if content:
                     grant_result += f"✅ ドラフト作成完了\n[ATTACHMENT_NEEDED:{user_id}:{filename}]\n"
