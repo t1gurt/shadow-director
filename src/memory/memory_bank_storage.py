@@ -219,10 +219,10 @@ class MemoryBankStorage:
         """
         try:
             # Use new API: client.agent_engines.memories.generate()
-            # Format fact as a conversation for memory generation
+            # scope is a dictionary for scoping memories
             result = self.client.agent_engines.memories.generate(
                 name=self.agent_engine_name,
-                user_id=channel_id,  # Use channel_id as user_id for scoping
+                scope={"channel_id": channel_id},
                 messages=[{
                     "role": "user",
                     "content": fact
@@ -254,12 +254,26 @@ class MemoryBankStorage:
             List of memory dictionaries
         """
         try:
-            # Use new API: client.agent_engines.memories.retrieve()
-            result = self.client.agent_engines.memories.retrieve(
-                name=self.agent_engine_name,
-                user_id=channel_id,  # Use channel_id as user_id for scoping
-                similarity_top_k=limit
-            )
+            # Use new API with scope parameter
+            if query:
+                # Similarity search with query
+                result = self.client.agent_engines.memories.retrieve(
+                    name=self.agent_engine_name,
+                    scope={"channel_id": channel_id},
+                    similarity_search_params={
+                        "query": query,
+                        "max_memories_to_return": min(limit, 100)
+                    }
+                )
+            else:
+                # Simple retrieval without query
+                result = self.client.agent_engines.memories.retrieve(
+                    name=self.agent_engine_name,
+                    scope={"channel_id": channel_id},
+                    simple_retrieval_params={
+                        "max_memories_to_return": min(limit, 100)
+                    }
+                )
             
             # Parse result into list of memory dicts
             memories = []
@@ -300,7 +314,7 @@ class MemoryBankStorage:
             
             result = self.client.agent_engines.memories.generate(
                 name=self.agent_engine_name,
-                user_id=channel_id,  # Use channel_id as user_id for scoping
+                scope={"channel_id": channel_id},
                 messages=messages
             )
             

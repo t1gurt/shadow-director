@@ -43,25 +43,68 @@ class SiteExplorer:
         """Async context manager exit - closes browser."""
         await self.close()
     
-    async def start(self):
-        """Start Playwright browser."""
-        try:
-            from playwright.async_api import async_playwright
-            
-            self._playwright = await async_playwright().start()
-            self.browser = await self._playwright.chromium.launch(
-                headless=self.headless,
-                args=['--no-sandbox', '--disable-dev-shm-usage'],
-                timeout=30000  # 30 seconds (reduced from default 180s)
-            )
-            self.context = await self.browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                viewport={'width': 1280, 'height': 720}
-            )
-            self.logger.info("[SITE_EXPLORER] Browser started")
-        except Exception as e:
-            self.logger.error(f"[SITE_EXPLORER] Failed to start browser: {e}")
-            raise
+    async def start(self, max_retries: int = 3):
+        """Start Playwright browser with Cloud Run optimizations."""
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                from playwright.async_api import async_playwright
+                
+                self._playwright = await async_playwright().start()
+                
+                # Cloud Run optimized Chromium arguments
+                chromium_args = [
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--disable-extensions',
+                    '--disable-background-networking',
+                    '--disable-default-apps',
+                    '--disable-sync',
+                    '--disable-translate',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding',
+                    '--disable-infobars',
+                    '--no-first-run',
+                    '--single-process',  # Important for containerized environments
+                    '--memory-pressure-off',
+                    '--js-flags=--max-old-space-size=256',  # Limit JS heap
+                ]
+                
+                # Increase timeout for cold start (60s on first attempt, 45s on retry)
+                launch_timeout = 60000 if attempt == 0 else 45000
+                
+                self.browser = await self._playwright.chromium.launch(
+                    headless=self.headless,
+                    args=chromium_args,
+                    timeout=launch_timeout
+                )
+                self.context = await self.browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    viewport={'width': 1280, 'height': 720}
+                )
+                self.logger.info(f"[SITE_EXPLORER] Browser started (attempt {attempt + 1})")
+                return  # Success
+                
+            except Exception as e:
+                last_error = e
+                self.logger.warning(f"[SITE_EXPLORER] Browser start attempt {attempt + 1} failed: {e}")
+                
+                # Clean up before retry
+                try:
+                    if hasattr(self, '_playwright') and self._playwright:
+                        await self._playwright.stop()
+                except:
+                    pass
+                
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)  # Wait before retry
+        
+        self.logger.error(f"[SITE_EXPLORER] Failed to start browser after {max_retries} attempts: {last_error}")
+        raise last_error
     
     async def close(self):
         """Close Playwright browser and cleanup."""

@@ -181,9 +181,19 @@ class FormatFieldMapper:
             paragraph_fields = self._analyze_word_paragraphs(doc.paragraphs)
             fields.extend(paragraph_fields)
             
-            self.logger.info(f"[FORMAT_MAPPER] Found {len(fields)} fields in Word file")
+            self.logger.info(f"[FORMAT_MAPPER] Found {len(fields)} fields in Word file (text-based)")
             
-            # VLMで追加解析
+            # テキストベースで検出できなかった場合、VLMでドキュメント全体を解析
+            if not fields and self.client:
+                self.logger.info("[FORMAT_MAPPER] No fields found with text-based analysis, trying VLM...")
+                fields = self._analyze_word_with_vlm(doc, file_path)
+            
+            # VLMでも検出できなかった場合、全テーブルセルを強制的に入力候補として検出
+            if not fields and doc.tables:
+                self.logger.info("[FORMAT_MAPPER] VLM also failed, using fallback: all table cells")
+                fields = self._fallback_word_all_cells(doc)
+            
+            # VLMで追加解析（フィールドの意味を推論）
             if fields and self.client:
                 fields = self._enhance_fields_with_vlm(fields, file_path, "word")
             
@@ -191,6 +201,150 @@ class FormatFieldMapper:
             self.logger.warning("[FORMAT_MAPPER] python-docx not installed")
         except Exception as e:
             self.logger.error(f"[FORMAT_MAPPER] Word analysis failed: {e}")
+        
+        return fields
+    
+    def _fallback_word_all_cells(self, doc) -> List[FieldInfo]:
+        """
+        フォールバック: すべてのテーブルセルを入力候補として検出。
+        ラベルセルの隣の空セルまたは長いセルを入力欄として扱う。
+        """
+        fields = []
+        
+        try:
+            for table_idx, table in enumerate(doc.tables):
+                for row_idx, row in enumerate(table.rows):
+                    cells = row.cells
+                    for col_idx, cell in enumerate(cells):
+                        cell_text = cell.text.strip()
+                        
+                        # 空セル（入力欄候補）
+                        if not cell_text:
+                            # 左隣にラベルがあれば入力欄
+                            if col_idx > 0:
+                                label_cell = cells[col_idx - 1]
+                                label_text = label_cell.text.strip()
+                                if label_text and len(label_text) < 50:
+                                    field = FieldInfo(
+                                        field_id=f"table{table_idx}_{row_idx}_{col_idx}",
+                                        field_name=label_text,
+                                        field_type="table_cell",
+                                        location={
+                                            "table_idx": table_idx,
+                                            "row": row_idx,
+                                            "col": col_idx
+                                        }
+                                    )
+                                    fields.append(field)
+                        
+                        # 長いセル（説明や記述欄の可能性）
+                        elif len(cell_text) > 50 and col_idx > 0:
+                            # 左隣がラベルなら入力欄
+                            label_cell = cells[col_idx - 1]
+                            label_text = label_cell.text.strip()
+                            if label_text and len(label_text) < 50:
+                                field = FieldInfo(
+                                    field_id=f"table{table_idx}_{row_idx}_{col_idx}",
+                                    field_name=label_text,
+                                    field_type="table_cell",
+                                    location={
+                                        "table_idx": table_idx,
+                                        "row": row_idx,
+                                        "col": col_idx
+                                    }
+                                )
+                                fields.append(field)
+            
+            self.logger.info(f"[FORMAT_MAPPER] Fallback detected {len(fields)} fields")
+            
+        except Exception as e:
+            self.logger.warning(f"[FORMAT_MAPPER] Fallback analysis failed: {e}")
+        
+        return fields
+    
+    def _analyze_word_with_vlm(self, doc, file_path: str) -> List[FieldInfo]:
+        """VLMを使ってWordドキュメント全体を解析しフィールドを抽出"""
+        fields = []
+        
+        try:
+            # ドキュメントの全テキストを抽出
+            full_text = ""
+            for para in doc.paragraphs:
+                full_text += para.text + "\n"
+            for table_idx, table in enumerate(doc.tables):
+                full_text += f"\n[テーブル{table_idx + 1}]\n"
+                for row in table.rows:
+                    row_text = " | ".join([cell.text.strip() for cell in row.cells])
+                    full_text += row_text + "\n"
+            
+            # VLMにフィールド検出を依頼
+            prompt = f"""
+以下はWord申請書フォーマットの内容です。
+入力が必要なフィールド（記入欄、空欄、プレースホルダー）を検出してください。
+
+## ドキュメント内容
+{full_text[:8000]}
+
+## 出力形式（JSON配列）
+[
+  {{
+    "field_id": "table0_0_1",
+    "field_name": "フィールド名/ラベル",
+    "field_type": "table_cell または paragraph",
+    "table_idx": テーブル番号（0から開始、テーブルの場合のみ）,
+    "row": 行番号（テーブルの場合のみ）,
+    "col": 列番号（テーブルの場合のみ）,
+    "paragraph_idx": 段落番号（段落の場合のみ）,
+    "description": "入力すべき内容の説明"
+  }}
+]
+
+注意:
+- 入力が必要な箇所のみを抽出してください
+- 空欄、下線、「記入してください」などの指示がある箇所を検出
+- ラベル（項目名）ではなく、入力欄の位置を特定してください
+- JSONのみを出力してください
+"""
+            
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
+            
+            # JSONをパース
+            response_text = response.text.strip()
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0]
+            
+            vlm_fields = json.loads(response_text)
+            
+            for vf in vlm_fields:
+                if vf.get("field_type") == "table_cell":
+                    location = {
+                        "table_idx": vf.get("table_idx", 0),
+                        "row": vf.get("row", 0),
+                        "col": vf.get("col", 0)
+                    }
+                else:
+                    location = {
+                        "paragraph_idx": vf.get("paragraph_idx", 0)
+                    }
+                
+                field = FieldInfo(
+                    field_id=vf.get("field_id", f"vlm_{len(fields)}"),
+                    field_name=vf.get("field_name", ""),
+                    field_type=vf.get("field_type", "table_cell"),
+                    location=location,
+                    description=vf.get("description")
+                )
+                fields.append(field)
+            
+            self.logger.info(f"[FORMAT_MAPPER] VLM detected {len(fields)} fields")
+            
+        except Exception as e:
+            self.logger.error(f"[FORMAT_MAPPER] VLM Word analysis failed: {e}")
         
         return fields
     
@@ -229,7 +383,17 @@ class FormatFieldMapper:
         return fields
     
     def _analyze_word_paragraphs(self, paragraphs) -> List[FieldInfo]:
-        """Word段落からフィールドを検出"""
+        """
+        Word段落からフィールドを検出。
+        
+        対応パターン:
+        - ラベル：____（下線プレースホルダー）
+        - ラベル：（入力してください）
+        - ラベル：　　（空白プレースホルダー）
+        - ◻ ラベル：（チェックボックス形式）
+        - 1. 質問文（200字以内）→ 次行入力
+        - ラベル：（同一行に短い入力がある場合）
+        """
         fields = []
         
         try:
@@ -238,27 +402,95 @@ class FormatFieldMapper:
             for para_idx, para in enumerate(paragraphs):
                 text = para.text.strip()
                 
-                # 入力プレースホルダーを検出
-                # パターン: 「○○：____」「○○（　　　）」
-                placeholder_patterns = [
-                    r'(.+?)[:：]\s*[_＿]{3,}',
-                    r'(.+?)[(（]\s*[　\s]*[)）]',
-                    r'(.+?)[:：]\s*$',  # コロンで終わる（次行が入力欄）
-                ]
+                if not text or len(text) < 3:
+                    continue
                 
-                for pattern in placeholder_patterns:
-                    match = re.search(pattern, text)
-                    if match:
+                # パターン1: チェックボックス形式 "◻ ラベル：入力"
+                checkbox_match = re.match(r'^[◻☐□■◼◾▢☑✓✔]?\s*(.+?)[:：]\s*(.*)$', text)
+                if checkbox_match:
+                    label = checkbox_match.group(1).strip()
+                    value_hint = checkbox_match.group(2).strip()
+                    
+                    # 括弧付きヒント or 空欄の場合は入力欄
+                    if not value_hint or re.match(r'^[（(].+[)）]$', value_hint) or re.match(r'^[　\s]+$', value_hint) or re.match(r'^[_＿]+$', value_hint):
                         field = FieldInfo(
                             field_id=f"para_{para_idx}",
-                            field_name=match.group(1).strip(),
+                            field_name=label,
                             field_type="paragraph",
                             location={
-                                "paragraph_idx": para_idx
-                            }
+                                "paragraph_idx": para_idx,
+                                "input_type": "inline"  # 同一行入力
+                            },
+                            description=value_hint if value_hint else None
                         )
                         fields.append(field)
-                        break
+                        continue
+                
+                # パターン2: 番号付き質問 "1. 質問文（文字数）" → 次の段落が入力欄
+                question_match = re.match(r'^(\d+)[.．、]\s*(.+?)([（(]\d+字?以?内?[）)])?$', text)
+                if question_match:
+                    label = question_match.group(2).strip()
+                    char_limit = question_match.group(3)
+                    
+                    # 次の段落を入力欄として検出
+                    field = FieldInfo(
+                        field_id=f"para_{para_idx + 1}",  # 次の段落
+                        field_name=label,
+                        field_type="paragraph",
+                        location={
+                            "paragraph_idx": para_idx + 1,
+                            "input_type": "next_line"  # 次行入力
+                        },
+                        description=char_limit,
+                        max_length=int(re.search(r'\d+', char_limit).group()) if char_limit and re.search(r'\d+', char_limit) else None
+                    )
+                    fields.append(field)
+                    continue
+                
+                # パターン3: 下線プレースホルダー
+                underline_match = re.search(r'(.+?)[:：]\s*[_＿]{3,}', text)
+                if underline_match:
+                    field = FieldInfo(
+                        field_id=f"para_{para_idx}",
+                        field_name=underline_match.group(1).strip(),
+                        field_type="paragraph",
+                        location={
+                            "paragraph_idx": para_idx,
+                            "input_type": "underline"
+                        }
+                    )
+                    fields.append(field)
+                    continue
+                
+                # パターン4: 空括弧プレースホルダー
+                bracket_match = re.search(r'(.+?)[(（]\s*[　\s]*[)）]', text)
+                if bracket_match:
+                    field = FieldInfo(
+                        field_id=f"para_{para_idx}",
+                        field_name=bracket_match.group(1).strip(),
+                        field_type="paragraph",
+                        location={
+                            "paragraph_idx": para_idx,
+                            "input_type": "bracket"
+                        }
+                    )
+                    fields.append(field)
+                    continue
+                
+                # パターン5: コロン終端（次行入力）
+                colon_end_match = re.match(r'^(.+?)[:：]\s*$', text)
+                if colon_end_match:
+                    field = FieldInfo(
+                        field_id=f"para_{para_idx + 1}",  # 次の段落
+                        field_name=colon_end_match.group(1).strip(),
+                        field_type="paragraph",
+                        location={
+                            "paragraph_idx": para_idx + 1,
+                            "input_type": "next_line"
+                        }
+                    )
+                    fields.append(field)
+                    continue
         
         except Exception as e:
             self.logger.warning(f"[FORMAT_MAPPER] Error analyzing Word paragraphs: {e}")

@@ -186,12 +186,14 @@ class Orchestrator:
 """
 
 
-    def _classify_format_file(self, filename: str) -> str:
+    def _classify_format_file(self, filename: str, file_path: str = None) -> str:
         """
         ファイル名からファイルの用途を判定する。
+        キーワードマッチしない場合はVLMで内容を解析。
         
         Args:
             filename: ファイル名
+            file_path: ファイルパス（VLM解析用）
             
         Returns:
             ファイルの用途を示す文字列
@@ -199,7 +201,7 @@ class Orchestrator:
         fn_lower = filename.lower()
         
         # 募集要項・公募要領系（最優先で判定）
-        if any(kw in fn_lower for kw in ['募集要項', '公募要領', '応募要項', '公募要項', '募集案内', '公募案内']):
+        if any(kw in fn_lower for kw in ['募集要項', '公募要領', '応募要項', '公募要項', '募集案内', '公募案内', 'guidelines', 'requirements']):
             return "📋 募集要項（応募条件・審査基準が記載）"
         
         # 交付要綱・規程系
@@ -207,7 +209,7 @@ class Orchestrator:
             return "📜 交付要綱・ガイドライン（ルール・規程）"
         
         # 記入例系（申請書より先に判定）
-        if any(kw in fn_lower for kw in ['記入例', '記載例', '作成例', 'サンプル', 'sample', '見本', '例']):
+        if any(kw in fn_lower for kw in ['記入例', '記載例', '作成例', 'サンプル', 'sample', '見本', '例', 'example']):
             return "📖 記入例・サンプル（参考資料）"
         
         # 申請書・様式系
@@ -230,8 +232,126 @@ class Orchestrator:
         if any(kw in fn_lower for kw in ['チェック', 'check', '確認', 'リスト']):
             return "✅ チェックリスト"
         
-        # 判定できない場合はファイル名から推測
+        # キーワードで判定できない場合、VLMで解析
+        if file_path and fn_lower.endswith(('.xlsx', '.xls', '.docx', '.doc', '.pdf')):
+            vlm_result = self._classify_file_with_vlm(file_path, filename)
+            if vlm_result:
+                return vlm_result
+        
         return "📄 関連資料"
+    
+    def _classify_file_with_vlm(self, file_path: str, filename: str) -> str:
+        """
+        VLMを使ってファイル内容から種別を判定する。
+        
+        Args:
+            file_path: ファイルパス
+            filename: ファイル名
+            
+        Returns:
+            ファイルの用途を示す文字列、または None
+        """
+        if not self.client:
+            return None
+        
+        try:
+            # ファイル内容を抽出
+            content = self._extract_file_content_for_classification(file_path)
+            if not content:
+                return None
+            
+            prompt = f"""
+以下のファイル内容から、このファイルの種類を判定してください。
+
+ファイル名: {filename}
+内容（冒頭部分）:
+{content[:3000]}
+
+以下の選択肢から1つだけ選んで回答してください:
+1. APPLICATION_FORM - 申請書/応募書/様式（記入が必要なフォーマット）
+2. GUIDELINES - 募集要項/公募要領（応募条件や審査基準が記載）
+3. REGULATIONS - 交付要綱/ガイドライン（ルール・規程）
+4. SAMPLE - 記入例/サンプル（参考資料）
+5. BUDGET - 予算書/経費明細
+6. REPORT - 報告書フォーマット
+7. PLAN - 事業計画書
+8. CHECKLIST - チェックリスト
+9. OTHER - その他資料
+
+回答は選択肢の英語キー（例: APPLICATION_FORM）のみを出力してください。
+"""
+            
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
+            
+            result = response.text.strip().upper()
+            
+            # 結果をマッピング
+            mapping = {
+                "APPLICATION_FORM": "📝 申請書フォーマット（記入が必要）",
+                "GUIDELINES": "📋 募集要項（応募条件・審査基準が記載）",
+                "REGULATIONS": "📜 交付要綱・ガイドライン（ルール・規程）",
+                "SAMPLE": "📖 記入例・サンプル（参考資料）",
+                "BUDGET": "💰 予算書（金額記入が必要）",
+                "REPORT": "📊 報告書フォーマット",
+                "PLAN": "📋 事業計画書",
+                "CHECKLIST": "✅ チェックリスト",
+            }
+            
+            return mapping.get(result, None)
+            
+        except Exception as e:
+            logging.warning(f"[ORCHESTRATOR] VLM classification failed: {e}")
+            return None
+    
+    def _extract_file_content_for_classification(self, file_path: str) -> str:
+        """ファイル内容を抽出（分類用）"""
+        try:
+            ext = os.path.splitext(file_path)[1].lower()
+            
+            if ext in ['.docx', '.doc']:
+                from docx import Document
+                doc = Document(file_path)
+                texts = []
+                for para in doc.paragraphs[:20]:  # 最初の20段落
+                    texts.append(para.text)
+                for table in doc.tables[:3]:  # 最初の3テーブル
+                    for row in table.rows:
+                        texts.append(" | ".join([cell.text.strip() for cell in row.cells]))
+                return "\n".join(texts)
+            
+            elif ext in ['.xlsx', '.xls']:
+                import openpyxl
+                wb = openpyxl.load_workbook(file_path, read_only=True)
+                texts = []
+                for sheet_name in wb.sheetnames[:2]:  # 最初の2シート
+                    sheet = wb[sheet_name]
+                    for row in list(sheet.iter_rows(max_row=20, values_only=True)):
+                        row_text = " | ".join([str(cell) for cell in row if cell])
+                        if row_text:
+                            texts.append(row_text)
+                wb.close()
+                return "\n".join(texts)
+            
+            elif ext == '.pdf':
+                try:
+                    import fitz  # PyMuPDF
+                    doc = fitz.open(file_path)
+                    texts = []
+                    for page_num in range(min(3, doc.page_count)):  # 最初の3ページ
+                        page = doc.load_page(page_num)
+                        texts.append(page.get_text())
+                    doc.close()
+                    return "\n".join(texts)
+                except ImportError:
+                    return None
+            
+        except Exception as e:
+            logging.warning(f"[ORCHESTRATOR] Content extraction failed: {e}")
+        
+        return None
 
     def route_message(self, user_message: str, user_id: str, attachments=None, **kwargs) -> str:
         """
@@ -324,7 +444,7 @@ class Orchestrator:
                 response += "📎 **申請フォーマットファイル** が見つかりました:\n\n"
                 response += "📑 **ファイル一覧**:\n"
                 for file_path, file_name in format_files:
-                    file_type = self._classify_format_file(file_name)
+                    file_type = self._classify_format_file(file_name, file_path)
                     response += f"  • `{file_name}` → {file_type}\n"
                 response += "\n"
                 for file_path, file_name in format_files:
@@ -650,7 +770,7 @@ URL: {grant_url}
                     grant_result += "📎 申請フォーマットファイル:\n"
                     grant_result += "📑 ファイル一覧:\n"
                     for file_path, file_name in draft_format_files:
-                        file_type = self._classify_format_file(file_name)
+                        file_type = self._classify_format_file(file_name, file_path)
                         grant_result += f"  • `{file_name}` → {file_type}\n"
                     grant_result += "\n"
                     for file_path, file_name in draft_format_files:

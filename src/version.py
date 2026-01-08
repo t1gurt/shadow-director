@@ -4,8 +4,8 @@ Shadow Director Version Information
 """
 
 # バージョン情報
-__version__ = "1.4.0"
-__update_date__ = "2026-01-05"
+__version__ = "1.5.0"
+__update_date__ = "2026-01-08"
 
 # 最新の追加機能リスト
 LATEST_FEATURES = [

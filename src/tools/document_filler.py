@@ -248,7 +248,15 @@ class DocumentFiller:
             return False
     
     def _fill_word_paragraph(self, doc, field_id: str, value: str) -> bool:
-        """Word段落に入力（プレースホルダーを置換）"""
+        """
+        Word段落に入力（プレースホルダーを置換）。
+        
+        対応する入力タイプ:
+        - inline: コロン後に入力を追加
+        - next_line: 段落全体を入力値で置換
+        - underline: 下線プレースホルダーを置換
+        - bracket: 空括弧プレースホルダーを置換
+        """
         try:
             # "para_N" をパース
             para_idx = int(field_id.replace("para_", ""))
@@ -260,22 +268,57 @@ class DocumentFiller:
             para = doc.paragraphs[para_idx]
             original_text = para.text
             
-            # プレースホルダーパターンを置換
             import re
             
-            # パターン: 「____」「＿＿＿」を置換
+            # パターン1: 下線プレースホルダー「____」「＿＿＿」を置換
             new_text = re.sub(r'[_＿]{3,}', value, original_text)
-            
-            # パターン: 空括弧「（　）」を置換
-            new_text = re.sub(r'[(（]\s*[　\s]*[)）]', f'（{value}）', new_text)
-            
             if new_text != original_text:
-                # テキストを更新
                 para.clear()
                 para.add_run(new_text)
                 return True
             
-            # プレースホルダーがない場合は末尾に追加
+            # パターン2: 空括弧プレースホルダー「（　）」を置換
+            new_text = re.sub(r'[(（]\s*[　\s]*[)）]', f'（{value}）', original_text)
+            if new_text != original_text:
+                para.clear()
+                para.add_run(new_text)
+                return True
+            
+            # パターン3: 括弧付きヒント「（入力してください）」を置換
+            new_text = re.sub(r'[(（][^)）]+[)）]', f'（{value}）', original_text)
+            if new_text != original_text:
+                para.clear()
+                para.add_run(new_text)
+                return True
+            
+            # パターン4: コロン終端の場合、コロン後に入力を追加
+            colon_match = re.match(r'^(.+?[:：])\s*$', original_text)
+            if colon_match:
+                new_text = f"{colon_match.group(1)} {value}"
+                para.clear()
+                para.add_run(new_text)
+                return True
+            
+            # パターン5: コロンがある場合、コロン後を置換
+            colon_replace_match = re.match(r'^(.+?[:：])\s*(.*)$', original_text)
+            if colon_replace_match:
+                prefix = colon_replace_match.group(1)
+                current_value = colon_replace_match.group(2).strip()
+                
+                # 現在の値が空、空白のみ、またはヒント（括弧付き）の場合に置換
+                if not current_value or re.match(r'^[　\s]+$', current_value) or re.match(r'^[（(].+[)）]$', current_value):
+                    new_text = f"{prefix} {value}"
+                    para.clear()
+                    para.add_run(new_text)
+                    return True
+            
+            # パターン6: 次行入力の場合（段落が比較的空の場合）、テキスト全体を置換
+            if len(original_text.strip()) < 10:
+                para.clear()
+                para.add_run(value)
+                return True
+            
+            # 上記いずれにも該当しない場合、段落末尾に追加
             para.add_run(f"\n{value}")
             return True
             
