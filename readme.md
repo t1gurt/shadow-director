@@ -40,6 +40,7 @@ NPO法人の代表者は、想いと行動力を持ちながらも、常に事�
   - **選択的ターンカウント**: 挨拶や補足説明はカウントせず、実質的なインタビュー質問のみを15問でカウント
   - **構造化プロファイル**: 対話結果を構造化し、GCS (Google Cloud Storage) に永続化
   - **会話履歴管理**: ターン数とコンテキストを保持し、自然な対話を実現
+  - **申請書特化モード**: 団体詳細（予算・スタッフ等）やプロジェクト構想（5W1H）を深掘りインタビューし、申請書作成に直結する情報を収集
 
 ### 2. 🦅 Autonomous Funding Watch (Observer Agent) - ✅ Implemented
 
@@ -71,6 +72,8 @@ NPO法人の代表者は、想いと行動力を持ちながらも、常に事�
     2. GCS: Production環境で `gs://{bucket}/drafts/{user_id}/` に永続化
     3. ローカル: 開発環境で `drafts/` フォルダにフォールバック
   - **インテリジェントルーティング**: ユーザーの発言から「DRAFT」意図を自動検出
+  - **Word/Excel項目別入力**: Gemini 3.0 Flashで各項目をプロファイル情報をもとに個別生成し、高精度な自動入力
+  - **Word入力パターン高精度検出**: VLM (Vision-Language Model) により、`line` / `next_line` / `underline` / `bracket` / `table` 等の入力パターンを視覚的に識別し、正確に記入
   - **Strong Match自動生成**: Observer検出時（共鳴度70+）に自動でドラフトを作成
 
 ### 4. 🛡️ Production-Ready Infrastructure - ✅ Implemented
@@ -358,14 +361,21 @@ gcloud run deploy shadow-director-bot \
 - **Last Deployed:** 2026-01-05 21:19 JST
 - **Region:** `us-central1`
 - **Status:** ✅ Active
-- **Version:** 1.4.0
+- **Version:** 1.8.0
 
-### Latest Updates (v1.4.0)
-- 🐛 **Memory Bank Fix**: Resolved initialization errors with Agent Engine creation
-- 🏷️ **Parallel Processing UX**: Added grant names to all progress messages ([Grant Name] format)
-- ⏱️ **Timeout Extension**: Extended overall timeout from 10 to 15 minutes
-- ⚡ **Performance Boost**: Increased parallel workers from 3 to 5 (40-50% faster)
-- 📋 **Grant Visibility**: Display all grants including those with resonance score below 90
+### Latest Updates (v1.8.0)
+- 🏗️ **内部構造改善**: OrchestratorとDrafterAgentのリファクタリングにより、ファイル分類ロジック`FileClassifier`を分離・最適化
+- 🚀 **処理効率化**: ファイル分類を早期段階（Step 1.5）で実行し、無関係なファイルの解析処理をスキップ
+- 🛡️ **検索精度向上**: Google Search GroundingやSearch Toolのクエリ厳格化により、無関係なWebページ探索を防止
+
+### Latest Updates (v1.7.0)
+- 📝 **項目別フォーマット入力**: VLMで検出した入力項目を、1項目ずつGemini 3.0 Flashとプロファイルをもとに生成・入力
+
+### Latest Updates (v1.6.0)
+- 📝 **申請書特化インタビュー**: 団体基本情報やプロジェクト詳細（構想・計画・予算）を対話で引き出し、プロファイルに保存
+- 👁️ **VLM入力パターン検出**: Word申請書の入力欄（下線、括弧、次行など）をGemini 3.0 Flash (VLM) で視覚的に特定し、自動入力精度を向上
+- 🔧 **モデル構成等の柔軟化**: プロンプト設定ファイルによるVLMモデル切り替えに対応
+- 🏢 **団体情報管理**: スタッフ数、予算規模、設立年などの定量的データを構造化保存
 
 ## 📝 License
 

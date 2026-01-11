@@ -7,7 +7,7 @@ Cloud Run（Linux）対応。openpyxlとpython-docxを使用。
 import logging
 import os
 import shutil
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
 
@@ -27,6 +27,80 @@ class DocumentFiller:
         
         # 出力ディレクトリを作成
         os.makedirs(self.output_dir, exist_ok=True)
+    
+    def _get_existing_font_style(self, paragraph):
+        """
+        段落から既存のフォントスタイルを取得する。
+        最初のrunのスタイルを使用。
+        
+        Returns:
+            Dict with font_name, font_size, bold, italic
+        """
+        style = {
+            "font_name": None,
+            "font_size": None,
+            "bold": None,
+            "italic": None
+        }
+        
+        try:
+            if paragraph.runs:
+                first_run = paragraph.runs[0]
+                if first_run.font:
+                    style["font_name"] = first_run.font.name
+                    style["font_size"] = first_run.font.size
+                    style["bold"] = first_run.font.bold
+                    style["italic"] = first_run.font.italic
+            
+            # runがない場合やフォントが取れない場合、段落スタイルから取得を試みる
+            if style["font_name"] is None and paragraph.style and paragraph.style.font:
+                style["font_name"] = paragraph.style.font.name
+                style["font_size"] = paragraph.style.font.size
+                style["bold"] = paragraph.style.font.bold
+                style["italic"] = paragraph.style.font.italic
+        except Exception as e:
+            self.logger.debug(f"[DOC_FILLER] Could not get font style: {e}")
+        
+        return style
+    
+    def _add_run_with_style(self, paragraph, text: str, style: Dict = None):
+        """
+        指定されたスタイルでrunを追加する。
+        
+        Args:
+            paragraph: 対象の段落
+            text: 追加するテキスト
+            style: フォントスタイル辞書（_get_existing_font_styleの戻り値）
+        """
+        run = paragraph.add_run(text)
+        
+        if style:
+            try:
+                if style.get("font_name"):
+                    run.font.name = style["font_name"]
+                if style.get("font_size"):
+                    run.font.size = style["font_size"]
+                if style.get("bold") is not None:
+                    run.font.bold = style["bold"]
+                if style.get("italic") is not None:
+                    run.font.italic = style["italic"]
+            except Exception as e:
+                self.logger.debug(f"[DOC_FILLER] Could not apply font style: {e}")
+        
+        return run
+    
+    def _clear_and_add_with_style(self, paragraph, text: str):
+        """
+        段落をクリアしてスタイルを保持したままテキストを追加する。
+        """
+        # 既存のスタイルを保存
+        style = self._get_existing_font_style(paragraph)
+        
+        # 段落をクリア
+        paragraph.clear()
+        
+        # スタイルを適用してテキストを追加
+        return self._add_run_with_style(paragraph, text, style)
     
     def fill_document(
         self, 
@@ -137,7 +211,7 @@ class DocumentFiller:
     def fill_word(
         self, 
         file_path: str, 
-        field_values: Dict[str, str],
+        field_values: Dict[str, Any],
         user_id: str = None
     ) -> Tuple[Optional[str], str]:
         """
@@ -145,10 +219,9 @@ class DocumentFiller:
         
         Args:
             file_path: テンプレートWordファイルのパス
-            field_values: {field_id: 入力値}
-                field_id形式: 
-                  - "tableN_行_列" (テーブルセル)
-                  - "para_N" (段落)
+            field_values: フィールド値のマッピング
+                新形式: {field_id: {"value": str, "input_pattern": str, "location": dict}}
+                旧形式: {field_id: str} （互換性維持）
             user_id: ユーザーID
             
         Returns:
@@ -168,23 +241,37 @@ class DocumentFiller:
             doc = Document(output_path)
             filled_count = 0
             
-            for field_id, value in field_values.items():
+            for field_id, field_data in field_values.items():
+                # 新形式と旧形式の両方に対応
+                if isinstance(field_data, dict):
+                    value = field_data.get("value", "")
+                    input_pattern = field_data.get("input_pattern", "inline")
+                    location = field_data.get("location", {})
+                    input_length_type = field_data.get("input_length_type", "unknown")
+                else:
+                    # 旧形式（文字列のみ）
+                    value = field_data
+                    input_pattern = "inline"
+                    location = {}
+                    input_length_type = "unknown"
+                
                 if not value:
                     continue
                 
                 try:
                     if field_id.startswith("table"):
-                        # テーブルセル: "tableN_行_列"
-                        filled = self._fill_word_table_cell(doc, field_id, value)
+                        # テーブルセル: "tableN_行_列" - input_length_typeを考慮
+                        filled = self._fill_word_table_cell(doc, field_id, value, input_length_type)
                     elif field_id.startswith("para_"):
-                        # 段落: "para_N"
-                        filled = self._fill_word_paragraph(doc, field_id, value)
+                        # 段落: "para_N" - 入力パターン情報を使用
+                        filled = self._fill_word_paragraph_with_pattern(doc, field_id, value, input_pattern, location)
                     else:
                         self.logger.warning(f"[DOC_FILLER] Unknown field_id format: {field_id}")
                         filled = False
                     
                     if filled:
                         filled_count += 1
+                        self.logger.debug(f"[DOC_FILLER] Filled {field_id} with pattern '{input_pattern}'")
                         
                 except Exception as e:
                     self.logger.warning(f"[DOC_FILLER] Error filling field {field_id}: {e}")
@@ -202,8 +289,16 @@ class DocumentFiller:
             self.logger.error(f"[DOC_FILLER] Word fill error: {e}")
             return None, f"Word入力エラー: {e}"
     
-    def _fill_word_table_cell(self, doc, field_id: str, value: str) -> bool:
-        """Wordテーブルセルに入力"""
+    def _fill_word_table_cell(self, doc, field_id: str, value: str, input_length_type: str = "unknown") -> bool:
+        """
+        Wordテーブルセルに入力。
+        
+        Args:
+            doc: Wordドキュメント
+            field_id: フィールドID（"tableN_行_列"形式）
+            value: 入力値
+            input_length_type: "short"（短文）, "long"（長文）, "unknown"
+        """
         try:
             # "tableN_行_列" をパース
             parts = field_id.split('_')
@@ -232,12 +327,18 @@ class DocumentFiller:
             
             cell = cells[col]
             
+            # 長文の場合、テーブルセル内に収まるように処理
+            # 短い場合はそのまま、長い場合は文字数を制限して...を付ける
+            if input_length_type == "short" and len(value) > 50:
+                # 短文フィールドに長いテキストが来た場合、切り詰める
+                value = value[:47] + "..."
+                self.logger.debug(f"[DOC_FILLER] Trimmed long value for short field: {field_id}")
+            
             # 既存テキストをクリアして新しいテキストを設定
-            # 注意: セル内の書式は維持したい場合は段落の最初のランを使う
+            # フォントスタイルを保持する
             if cell.paragraphs:
                 para = cell.paragraphs[0]
-                para.clear()
-                para.add_run(value)
+                self._clear_and_add_with_style(para, value)
             else:
                 cell.text = value
             
@@ -325,6 +426,128 @@ class DocumentFiller:
         except Exception as e:
             self.logger.warning(f"[DOC_FILLER] Paragraph fill error: {e}")
             return False
+    
+    def _fill_word_paragraph_with_pattern(
+        self, 
+        doc, 
+        field_id: str, 
+        value: str, 
+        input_pattern: str,
+        location: Dict[str, Any]
+    ) -> bool:
+        """
+        VLMで検出された入力パターンに基づいてWord段落に入力する。
+        
+        Args:
+            doc: Wordドキュメント
+            field_id: フィールドID（"para_N"形式）
+            value: 入力値
+            input_pattern: 入力パターン（"inline", "next_line", "underline", "bracket"）
+            location: 位置情報（paragraph_idx, label_paragraph_idx等）
+            
+        Returns:
+            入力成功かどうか
+        """
+        try:
+            import re
+            
+            # パターンに応じた処理
+            para_idx = location.get("paragraph_idx")
+            if para_idx is None:
+                # field_idからパース
+                para_idx = int(field_id.replace("para_", ""))
+            
+            if para_idx >= len(doc.paragraphs):
+                self.logger.warning(f"[DOC_FILLER] Paragraph {para_idx} not found")
+                return False
+            
+            para = doc.paragraphs[para_idx]
+            original_text = para.text
+            
+            # パターン別の入力処理
+            # 事前にスタイルを取得
+            style = self._get_existing_font_style(para)
+            
+            if input_pattern == "next_line":
+                # 次行入力: 段落全体を入力値で置換（スタイル保持）
+                # この段落がラベルの次の段落なので、内容を完全に置き換える
+                para.clear()
+                self._add_run_with_style(para, value, style)
+                self.logger.debug(f"[DOC_FILLER] Applied next_line pattern to para {para_idx}")
+                return True
+            
+            elif input_pattern == "underline":
+                # 下線プレースホルダー「____」を置換（スタイル保持）
+                new_text = re.sub(r'[_＿]{2,}', value, original_text)
+                if new_text != original_text:
+                    para.clear()
+                    self._add_run_with_style(para, new_text, style)
+                    self.logger.debug(f"[DOC_FILLER] Applied underline pattern to para {para_idx}")
+                    return True
+                # 下線がない場合はinlineとして処理
+                input_pattern = "inline"
+            
+            elif input_pattern == "bracket":
+                # 括弧プレースホルダー「（　）」「（入力してください）」を置換（スタイル保持）
+                # まず空括弧を試す
+                new_text = re.sub(r'[(（]\s*[　\s]*[)）]', f'（{value}）', original_text)
+                if new_text != original_text:
+                    para.clear()
+                    self._add_run_with_style(para, new_text, style)
+                    self.logger.debug(f"[DOC_FILLER] Applied bracket pattern (empty) to para {para_idx}")
+                    return True
+                # ヒント付き括弧を試す
+                new_text = re.sub(r'[(（][^)）]+[)）]', f'（{value}）', original_text)
+                if new_text != original_text:
+                    para.clear()
+                    self._add_run_with_style(para, new_text, style)
+                    self.logger.debug(f"[DOC_FILLER] Applied bracket pattern (with hint) to para {para_idx}")
+                    return True
+                # 括弧がない場合はinlineとして処理
+                input_pattern = "inline"
+            
+            # inlineパターン（デフォルト）
+            if input_pattern == "inline":
+                # コロン後に入力を追加/置換（スタイル保持）
+                colon_match = re.match(r'^(.+?[:：])\s*(.*)$', original_text)
+                if colon_match:
+                    prefix = colon_match.group(1)
+                    current_value = colon_match.group(2).strip()
+                    
+                    # 現在の値が空、空白のみ、下線、またはヒント（括弧付き）の場合に置換
+                    if (not current_value or 
+                        re.match(r'^[　\s]+$', current_value) or 
+                        re.match(r'^[_＿]+$', current_value) or
+                        re.match(r'^[（(].+[)）]$', current_value)):
+                        new_text = f"{prefix} {value}"
+                        para.clear()
+                        self._add_run_with_style(para, new_text, style)
+                        self.logger.debug(f"[DOC_FILLER] Applied inline pattern to para {para_idx}")
+                        return True
+                    else:
+                        # 既存の値がある場合は置き換える
+                        new_text = f"{prefix} {value}"
+                        para.clear()
+                        self._add_run_with_style(para, new_text, style)
+                        self.logger.debug(f"[DOC_FILLER] Replaced existing value with inline pattern in para {para_idx}")
+                        return True
+                
+                # コロンがない場合は段落末尾に追加（スタイル保持）
+                self._add_run_with_style(para, f" {value}", style)
+                self.logger.debug(f"[DOC_FILLER] Appended value to para {para_idx} (no colon found)")
+                return True
+            
+            # 不明なパターンの場合はフォールバックとして既存メソッドを使用
+            self.logger.warning(f"[DOC_FILLER] Unknown pattern '{input_pattern}', using fallback")
+            return self._fill_word_paragraph(doc, field_id, value)
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Pattern-based paragraph fill error: {e}")
+            # フォールバックとして既存メソッドを試す
+            try:
+                return self._fill_word_paragraph(doc, field_id, value)
+            except:
+                return False
     
     def _create_output_path(self, original_path: str, user_id: str, ext: str) -> str:
         """出力ファイルパスを生成"""

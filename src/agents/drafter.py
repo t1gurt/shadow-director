@@ -9,6 +9,7 @@ from src.tools.file_downloader import FileDownloader
 from src.logic.grant_page_scraper import GrantPageScraper
 from src.logic.format_field_mapper import FormatFieldMapper
 from src.tools.document_filler import DocumentFiller
+from src.logic.file_classifier import FileClassifier
 
 class DrafterAgent:
     def __init__(self):
@@ -45,6 +46,10 @@ class DrafterAgent:
             model_name=self.model_name
         )
         self.document_filler = DocumentFiller()
+        
+        # Initialize file classifier for early filtering
+        vlm_model = self.config.get("model_config", {}).get("vlm_model", "gemini-3-flash-preview")
+        self.file_classifier = FileClassifier(self.client, vlm_model)
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -53,6 +58,52 @@ class DrafterAgent:
         except Exception as e:
             print(f"Error loading config: {e}")
             return {}
+
+    def _sanitize_grant_name_for_search(self, grant_name: str) -> str:
+        """
+        検索クエリで使用するためにgrant_nameをサニタイズする。
+        ユーザーのコマンド（「ドラフトを作成して」等）を除去。
+        
+        Args:
+            grant_name: サニタイズ対象の助成金名
+            
+        Returns:
+            サニタイズ済みの助成金名
+        """
+        import re
+        
+        if not grant_name:
+            return ""
+        
+        # 除去すべきフレーズ（コマンド系）
+        remove_phrases = [
+            r'のドラフトを作成して',
+            r'ドラフトを作成して',
+            r'のドラフト作成',
+            r'ドラフト作成',
+            r'の申請書を書いて',
+            r'申請書を書いて',
+            r'を書いて',
+            r'について調べて',
+            r'について詳しく',
+            r'を調べて',
+            r'の詳細',
+        ]
+        
+        sanitized = grant_name
+        for phrase in remove_phrases:
+            sanitized = re.sub(phrase, '', sanitized)
+        
+        # 前後の空白を除去
+        sanitized = sanitized.strip()
+        
+        # 括弧内の年度情報は保持（例：「2025年度後期」）
+        # ただし、空になった場合は元の名前を返す
+        if not sanitized:
+            # 最低限のサニタイズ：明らかなコマンド部分のみ除去
+            sanitized = grant_name.replace('のドラフトを作成して', '').replace('ドラフトを作成して', '').strip()
+        
+        return sanitized
 
     def _research_grant_format(self, grant_name: str, user_id: str, grant_url: str = None) -> Tuple[str, List[Tuple[str, str]]]:
         """
@@ -150,10 +201,15 @@ class DrafterAgent:
             found_urls = set(re.findall(url_pattern, format_info, re.IGNORECASE))
             
             # 2. Extract page URLs from Grounding Metadata and deep search
+            # Only explore URLs that appear to be related to the target grant
             try:
                 if response.candidates and response.candidates[0].grounding_metadata:
                     metadata = response.candidates[0].grounding_metadata
                     if hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
+                        # Extract keywords from grant name for URL validation
+                        grant_keywords = self._extract_grant_keywords_for_validation(grant_name)
+                        logging.info(f"[DRAFTER] Grant keywords for URL validation: {grant_keywords}")
+                        
                         for chunk in metadata.grounding_chunks:
                             if hasattr(chunk, 'web') and chunk.web and chunk.web.uri:
                                 page_url = chunk.web.uri
@@ -167,7 +223,12 @@ class DrafterAgent:
                                     except:
                                         pass
                                 
-                                logging.info(f"[DRAFTER] Deep searching page for files: {page_url}")
+                                # Validate URL relevance before exploring
+                                if not self._is_url_relevant_to_grant(page_url, grant_keywords):
+                                    logging.info(f"[DRAFTER] Skipping unrelated URL: {page_url}")
+                                    continue
+                                
+                                logging.info(f"[DRAFTER] Deep searching relevant page for files: {page_url}")
                                 page_files = self.file_downloader.find_files_in_page(page_url)
                                 found_urls.update(page_files)
             except Exception as e:
@@ -245,6 +306,121 @@ class DrafterAgent:
 - 団体の実績と信頼性
 - 費用対効果
 """, [])
+
+    def _extract_grant_keywords_for_validation(self, grant_name: str) -> List[str]:
+        """
+        助成金名からURL検証用のキーワードを抽出する。
+        組織名や助成金名の主要部分を意味のある単位で抽出する。
+        """
+        import re
+        keywords = []
+        
+        if not grant_name:
+            return keywords
+        
+        # 財団名・法人名の抽出
+        org_patterns = [
+            r'(?:公益)?(?:社団|財団)法人\s*([^\s（(]+)',  # 法人名（括弧前まで）
+            r'([^\s・（(]+財団)',      # ～財団
+            r'([^\s・（(]+基金)',      # ～基金
+            r'([^\s・（(]+協会)',      # ～協会
+            r'([^\s・（(]+機構)',      # ～機構
+        ]
+        
+        for pattern in org_patterns:
+            match = re.search(pattern, grant_name)
+            if match:
+                keywords.append(match.group(1))
+        
+        # 中黒（・）やスペースで区切られた主要な部分を抽出
+        # 例: "コンサベーション・アライアンス・ジャパン" → ["コンサベーション", "アライアンス", "ジャパン"]
+        parts = re.split(r'[・\s　]+', grant_name)
+        for part in parts:
+            # 括弧や年度を除去
+            clean_part = re.sub(r'[（(【「].*$', '', part)
+            # 3文字以上の部分のみ追加
+            if len(clean_part) >= 3:
+                keywords.append(clean_part)
+        
+        # 重複を除去して返す
+        return list(set(keywords))
+    
+    def _is_url_relevant_to_grant(self, url: str, grant_keywords: List[str]) -> bool:
+        """
+        URLが対象助成金に関連しているか判定する。
+        ドメイン判定はFQDN（ドメイン名のみ）で行う。
+        
+        Returns:
+            True if URL appears to be related to the grant
+        """
+        from urllib.parse import urlparse
+        
+        url_lower = url.lower()
+        
+        # URLからFQDN（ドメイン名）を抽出
+        try:
+            parsed = urlparse(url)
+            fqdn = parsed.netloc.lower()  # 例: "outdoorconservation.jp"
+            path = parsed.path.lower()    # 例: "/promotion-support"
+        except Exception:
+            fqdn = ""
+            path = ""
+        
+        logging.debug(f"[DRAFTER] URL validation: FQDN={fqdn}, path={path}")
+        
+        # Google検索ページは除外（grounding_metadataが検索ページを返すことがある）
+        if 'google.com' in fqdn or 'google.co.jp' in fqdn:
+            if '/search' in path:
+                logging.info(f"[DRAFTER] Blocking Google search page URL: {url[:100]}")
+                return False
+        
+        # 明らかに無関係なドメインを除外（FQDNで判定）
+        blocked_domains = [
+            'amazon.co.jp', 'amazon.com', 'rakuten.co.jp',
+            'yahoo.co.jp',  # Yahoo知恵袋など
+            'twitter.com', 'x.com', 'facebook.com', 'instagram.com',
+            'youtube.com', 'wikipedia.org',
+            'note.com',  # 個人ブログ
+            'time.is',  # 時刻サイト
+            'weather.com', 'tenki.jp',  # 天気サイト
+        ]
+        for blocked in blocked_domains:
+            if fqdn == blocked or fqdn.endswith('.' + blocked):
+                return False
+        
+        # キーワードがあればURL全体で許可
+        if grant_keywords:
+            for keyword in grant_keywords:
+                if keyword.lower() in url_lower:
+                    return True
+        
+        # 信頼できる日本のドメイン（FQDNで判定）
+        # .jp で終わるドメインは基本的に信頼
+        if fqdn.endswith('.jp'):
+            return True
+        
+        # その他の信頼ドメイン
+        trusted_tlds = ['.org', '.edu', '.gov']
+        for tld in trusted_tlds:
+            if fqdn.endswith(tld):
+                return True
+        
+        # ファイル拡張子を含むURLは許可（直接ファイルリンク）
+        if any(ext in path for ext in ['.pdf', '.docx', '.doc', '.xlsx', '.xls', '.zip']):
+            return True
+        
+        # 助成金関連キーワードをパスに含むURLは許可
+        grant_related_keywords = [
+            '助成', '補助', '支援', '申請', '公募', '募集',  # 日本語
+            'grant', 'subsidy', 'application', 'support', 'promotion', 'fund'  # 英語
+        ]
+        for kw in grant_related_keywords:
+            if kw in path:
+                return True
+        
+        # それ以外は無関係と判断
+        logging.info(f"[DRAFTER] URL does not match criteria, skipping: {url[:100]} (FQDN: {fqdn})")
+        return False
 
     def _analyze_application_format(
         self, 
@@ -447,11 +623,15 @@ class DrafterAgent:
                 logging.info("[DRAFTER] Could not extract organization name for Playwright search")
                 return []
             
-            # Build search URL (use Google to find organization's grant page)
-            search_query = f"{org_name} 助成金 申請書 様式"
+            # Sanitize grant_name: remove command-like phrases that shouldn't be in search
+            sanitized_grant_name = self._sanitize_grant_name_for_search(grant_name)
+            
+            # Build more specific search URL with grant name for better targeting
+            # Include both organization name and grant name for more precise results
+            search_query = f'"{org_name}" "{sanitized_grant_name}" 申請書 様式 filetype:pdf OR filetype:docx OR filetype:xlsx'
             search_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
             
-            logging.info(f"[DRAFTER] Playwright deep search for: {org_name}")
+            logging.info(f"[DRAFTER] Playwright deep search for: {grant_name} (org: {org_name})")
             
             # Now we can safely run asyncio.run() within the existing event loop
             return asyncio.run(self._async_playwright_deep_search(search_url, grant_name, user_id))
@@ -472,8 +652,8 @@ class DrafterAgent:
         downloaded_files = []
         
         try:
-            # Use deep search to find format files
-            format_files = await self.page_scraper.deep_search_format_files(start_url, max_depth=2)
+            # Use deep search to find format files (pass grant_name for relevance filtering)
+            format_files = await self.page_scraper.deep_search_format_files(start_url, max_depth=2, grant_name=grant_name)
             
             if not format_files:
                 logging.info("[DRAFTER] Playwright found no format files")
@@ -553,7 +733,34 @@ class DrafterAgent:
         logging.info(f"[DRAFTER] Step 1: Researching format for '{grant_name}'")
         format_info, format_files = self._research_grant_format(grant_name, user_id, grant_url=grant_url)
         
-        # Step 2: Analyze downloaded format files with Gemini 3.0 Pro
+        # Step 1.5: Early file classification to filter irrelevant files
+        # This prevents wasting resources on analyzing unrelated files
+        related_files = []
+        excluded_files = []
+        if format_files:
+            logging.info(f"[DRAFTER] Step 1.5: Classifying {len(format_files)} files for relevance")
+            notifier.notify_sync(
+                ProgressStage.PROCESSING,
+                f"🔍 [{grant_display_name}] ファイルの関連性を確認中..."
+            )
+            
+            for file_path, file_name in format_files:
+                file_type = self.file_classifier.classify_format_file(file_name, file_path, grant_name)
+                
+                # Check if file is unrelated (contains "別の助成金の可能性")
+                if "別の助成金の可能性" in file_type:
+                    excluded_files.append((file_path, file_name, file_type))
+                    logging.info(f"[DRAFTER] Excluding unrelated file: {file_name}")
+                else:
+                    related_files.append((file_path, file_name, file_type))
+                    logging.info(f"[DRAFTER] Related file: {file_name} -> {file_type}")
+            
+            logging.info(f"[DRAFTER] File classification complete: {len(related_files)} related, {len(excluded_files)} excluded")
+            
+            # Update format_files to only include related files (without file_type for compatibility)
+            format_files = [(fp, fn) for fp, fn, _ in related_files]
+        
+        # Step 2: Analyze downloaded format files with Gemini 3.0 Pro (only related files)
         format_analysis = ""
         if format_files:
             logging.info(f"[DRAFTER] Step 2: Analyzing {len(format_files)} format files with Gemini")
@@ -666,14 +873,17 @@ class DrafterAgent:
             
             message = f"ドラフトを作成しました: {file_path}"
             
-            # Step 4: Fill format files with draft content
+            # Step 4: Fill format files with draft content (field-by-field processing)
             filled_files = []
             if format_files:
-                logging.info(f"[DRAFTER] Step 4: Attempting to fill {len(format_files)} format files")
+                logging.info(f"[DRAFTER] Step 4: Attempting to fill {len(format_files)} format files (field-by-field)")
                 notifier.notify_sync(
                     ProgressStage.PROCESSING,
-                    f"📝 [{grant_display_name}] フォーマットに入力中..."
+                    f"📝 [{grant_display_name}] フォーマットに項目別に入力中..."
                 )
+                
+                # 全ファイルのfield_valuesを蓄積（懸念点レポート用）
+                all_field_values = {}
                 
                 for file_path_orig, file_name_orig in format_files:
                     try:
@@ -683,7 +893,7 @@ class DrafterAgent:
                             logging.info(f"[DRAFTER] Skipping non-fillable file: {file_name_orig}")
                             continue
                         
-                        # Analyze format fields
+                        # Analyze format fields using VLM
                         fields, file_type = self.format_mapper.analyze_format_file(file_path_orig)
                         
                         if not fields:
@@ -692,16 +902,21 @@ class DrafterAgent:
                         
                         logging.info(f"[DRAFTER] Found {len(fields)} fields in {file_name_orig}")
                         
-                        # Map draft content to fields
-                        field_values = self.format_mapper.map_draft_to_fields(
-                            fields, 
-                            draft_content, 
-                            grant_name
+                        # Fill fields individually using profile (field-by-field processing)
+                        # Note: No Discord notification per field - progress is logged only
+                        field_values = self.format_mapper.fill_fields_individually(
+                            fields=fields,
+                            profile=profile,
+                            grant_name=grant_name,
+                            grant_info=grant_info
                         )
                         
                         if not field_values:
-                            logging.info(f"[DRAFTER] Could not map draft to fields in: {file_name_orig}")
+                            logging.info(f"[DRAFTER] Could not fill fields in: {file_name_orig}")
                             continue
+                        
+                        # 懸念点レポート用に蓄積
+                        all_field_values.update(field_values)
                         
                         # Fill the document
                         filled_path, fill_message = self.document_filler.fill_document(
@@ -721,7 +936,24 @@ class DrafterAgent:
                         logging.warning(f"[DRAFTER] Error filling {file_name_orig}: {fill_error}")
                 
                 if filled_files:
-                    message += f"\n📋 {len(filled_files)}件のフォーマットに入力しました"
+                    message += f"\n📋 {len(filled_files)}件のフォーマットに項目別入力しました"
+                
+                # 懸念点レポートを生成
+                if all_field_values:
+                    concern_report = self.format_mapper.generate_concern_report(all_field_values)
+                    if concern_report:
+                        message += f"\n\n{concern_report}"
+                        logging.info(f"[DRAFTER] Generated concern report")
+                    
+                    # 事務局長レビューを生成
+                    director_review = self._generate_director_review(
+                        grant_name=grant_name,
+                        field_values=all_field_values,
+                        profile=profile
+                    )
+                    if director_review:
+                        message += f"\n\n{director_review}"
+                        logging.info(f"[DRAFTER] Generated director review")
             
             # Completion notification
             notifier.notify_sync(
@@ -730,7 +962,8 @@ class DrafterAgent:
             )
             
             logging.info(f"[DRAFTER] create_draft completed successfully, filled_files: {len(filled_files)}")
-            return (message, draft_content, filename, format_files, filled_files)
+            # Return related_files with file_type info (file_path, file_name, file_type)
+            return (message, draft_content, filename, related_files, filled_files)
             
         except Exception as e:
             logging.error(f"[DRAFTER] Error in create_draft: {e}", exc_info=True)
@@ -868,3 +1101,70 @@ class DrafterAgent:
         except Exception as e:
             return (f"ドラフト取得エラー: {e}", None)
 
+    def _generate_director_review(
+        self, 
+        grant_name: str, 
+        field_values: Dict[str, Any],
+        profile: str
+    ) -> str:
+        """
+        事務局長の観点からドラフトをレビューし、コメントを生成する。
+        
+        Args:
+            grant_name: 助成金名
+            field_values: 入力されたフィールド値
+            profile: NPOプロファイル
+            
+        Returns:
+            Markdown形式の事務局長レビュー
+        """
+        if not self.client or not field_values:
+            return ""
+        
+        try:
+            # フィールド値をテキスト化
+            fields_text = "\n".join([
+                f"- **{data.get('field_name', fid)}**: {data.get('value', '')[:200]}..."
+                if len(data.get('value', '')) > 200
+                else f"- **{data.get('field_name', fid)}**: {data.get('value', '')}"
+                for fid, data in field_values.items()
+                if data.get('value')
+            ])
+            
+            prompt = f"""あなたはNPOの事務局長として、助成金申請書のドラフトをレビューしてください。
+
+# 対象助成金
+{grant_name}
+
+# NPOプロファイル概要
+{profile[:2000]}
+
+# 入力されたドラフト内容
+{fields_text[:4000]}
+
+# レビュー観点
+1. **全体評価**: 申請書全体としての完成度を評価してください
+2. **強み**: この申請書の良い点を挙げてください
+3. **改善提案**: より説得力を高めるための具体的な改善提案をしてください
+4. **確認事項**: 提出前に団体内で確認すべき事項を挙げてください
+
+# 出力形式
+事務局長としての簡潔なコメント（300字程度）を出力してください。
+箇条書きではなく、自然な文章で記述してください。
+"""
+            
+            response = self.client.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=prompt
+            )
+            
+            review_text = response.text.strip()
+            
+            if review_text:
+                return f"## 📝 事務局長レビュー\n\n{review_text}"
+            
+            return ""
+            
+        except Exception as e:
+            logging.warning(f"[DRAFTER] Director review generation failed: {e}")
+            return ""

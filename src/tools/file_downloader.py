@@ -157,8 +157,18 @@ class FileDownloader:
             user_dir = self.storage_path / user_id
             user_dir.mkdir(parents=True, exist_ok=True)
             
-            # Save file
+            # Handle duplicate filenames by adding suffix (_1, _2, etc.)
             file_path = user_dir / filename
+            if file_path.exists():
+                base_name = Path(filename).stem
+                extension = Path(filename).suffix
+                counter = 1
+                while file_path.exists():
+                    new_filename = f"{base_name}_{counter}{extension}"
+                    file_path = user_dir / new_filename
+                    counter += 1
+                filename = file_path.name  # Update filename to include suffix
+                self.logger.info(f"[DOWNLOAD] Duplicate filename detected, renamed to: {filename}")
             
             # Download file in chunks
             total_size = 0

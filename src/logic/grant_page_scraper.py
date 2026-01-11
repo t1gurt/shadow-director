@@ -199,13 +199,14 @@ class GrantPageScraper:
         
         return result
     
-    async def deep_search_format_files(self, start_url: str, max_depth: int = 2) -> List[Dict[str, Any]]:
+    async def deep_search_format_files(self, start_url: str, max_depth: int = 2, grant_name: str = None) -> List[Dict[str, Any]]:
         """
         Deep search for format files by following links up to max_depth levels.
         
         Args:
             start_url: Starting URL
             max_depth: Maximum depth of link following
+            grant_name: Grant name for relevance filtering (optional but recommended)
             
         Returns:
             List of found format file information
@@ -215,6 +216,10 @@ class GrantPageScraper:
         found_files = []
         visited_urls = set()
         urls_to_visit = [(start_url, 0)]  # (url, depth)
+        
+        # Log if grant_name is missing for debugging
+        if not grant_name:
+            self.logger.warning("[GRANT_SCRAPER] deep_search_format_files called without grant_name - relevance filtering will be limited")
         
         async with SiteExplorer(headless=True, timeout=self.timeout) as explorer:
             while urls_to_visit:
@@ -234,16 +239,16 @@ class GrantPageScraper:
                     # Extract links
                     all_links = await explorer.extract_links(page)
                     
-                    # Find format files
-                    format_files = await self._find_format_files(all_links, page)
+                    # Find format files (pass grant_name for relevance scoring)
+                    format_files = await self._find_format_files(all_links, page, grant_name)
                     for f in format_files:
                         f['found_at'] = current_url
                         f['depth'] = depth
                     found_files.extend(format_files)
                     
-                    # Queue related links for further exploration
+                    # Queue related links for further exploration (with grant_name for better filtering)
                     if depth < max_depth:
-                        related = self._filter_grant_related_links(all_links)
+                        related = self._filter_grant_related_links(all_links, grant_name)
                         for link in related[:5]:  # Limit to 5 links per page
                             link_url = link.get('href')
                             if link_url and link_url not in visited_urls:

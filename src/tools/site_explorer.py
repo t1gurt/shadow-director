@@ -69,9 +69,12 @@ class SiteExplorer:
                     '--disable-renderer-backgrounding',
                     '--disable-infobars',
                     '--no-first-run',
-                    '--single-process',  # Important for containerized environments
+                    '--disable-setuid-sandbox',  # Better for containerized environments
                     '--memory-pressure-off',
-                    '--js-flags=--max-old-space-size=256',  # Limit JS heap
+                    '--js-flags=--max-old-space-size=512',  # Increased from 256 for stability
+                    # Suppress D-Bus errors in containerized environments
+                    '--disable-features=AudioServiceOutOfProcess',
+                    '--disable-dbus',
                 ]
                 
                 # Increase timeout for cold start (60s on first attempt, 45s on retry)

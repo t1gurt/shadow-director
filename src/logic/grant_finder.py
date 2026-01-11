@@ -442,6 +442,42 @@ class GrantFinder:
             logging.error(f"[GRANT_FINDER] Async Playwright error: {e}")
             return None
 
+    def _sanitize_grant_name(self, grant_name: str) -> str:
+        """
+        助成金名からユーザーコマンド（「ドラフトを作成して」等）を除去する。
+        
+        Args:
+            grant_name: サニタイズ対象の助成金名
+            
+        Returns:
+            サニタイズ済みの助成金名
+        """
+        if not grant_name:
+            return ""
+        
+        # 除去すべきフレーズ（コマンド系）
+        remove_phrases = [
+            'のドラフトを作成して',
+            'ドラフトを作成して',
+            'のドラフト作成',
+            'ドラフト作成',
+            'の申請書を書いて',
+            '申請書を書いて',
+            'を書いて',
+            'について調べて',
+            'について詳しく',
+            'を調べて',
+            'の詳細',
+            'を探して',
+            'のドラフトを探して',
+        ]
+        
+        sanitized = grant_name
+        for phrase in remove_phrases:
+            sanitized = sanitized.replace(phrase, '')
+        
+        return sanitized.strip()
+
     def _extract_grant_keywords(self, grant_name: str) -> str:
         """
         Extract meaningful keywords from grant name, excluding generic organizational terms.
@@ -510,8 +546,13 @@ class GrantFinder:
         # Extract organization name for targeted retry search
         org_name = self.validator.extract_organization_name(grant_name)
         
+        # サニタイズ済みの助成金名を取得（コマンドフレーズを除去）
+        sanitized_grant_name = self._sanitize_grant_name(grant_name)
+        
         # Extract key terms from grant name (exclude generic terms)
         grant_keywords = self._extract_grant_keywords(grant_name)
+        
+        logging.info(f"[GRANT_FINDER] 検索戦略: 全体名='{sanitized_grant_name}', キーワード={grant_keywords}")
         
         # Validate: skip generic organization names
         if org_name:
@@ -520,36 +561,29 @@ class GrantFinder:
                 logging.warning(f"[GRANT_FINDER] Extracted org_name is too generic: {org_name}, using grant_name instead")
                 org_name = None
         
-        # Define multiple search strategies with grant keywords included
+        # 検索戦略を改善：まず助成金名全体で検索、次にキーワード抽出
         search_queries = []
+        
+        # Strategy 1: まず助成金名全体で検索（最優先）
+        if sanitized_grant_name and len(sanitized_grant_name) > 5:
+            search_queries.append(f'"{sanitized_grant_name}" 公式')
+            search_queries.append(f'"{sanitized_grant_name}" 募集')
+        
+        # Strategy 2: 組織名 + キーワードの組み合わせ（代替）
         if org_name and grant_keywords:
-            # Strategy 1: Organization + Keywords
-            search_queries = [
+            search_queries.extend([
                 f"{org_name} {grant_keywords} 募集 2026",
                 f"{org_name} {grant_keywords} 申請",
-                f"{org_name} {grant_keywords} 公募",
-                f"{org_name} 助成金 {grant_keywords}",
-            ]
+            ])
         elif org_name:
-            # Strategy 2: Organization only (but less preferred)
-            search_queries = [
+            search_queries.extend([
                 f"{org_name} 助成金 募集 2026",
                 f"{org_name} 補助金 申請",
-                f"{org_name} 支援 公募",
-            ]
-        else:
-            # Strategy 3: Full grant name or keywords fallback
-            if grant_keywords:
-                search_queries = [
-                    f"{grant_keywords} 助成金 公式",
-                    f"{grant_keywords} 申請 募集",
-                    f"{grant_name[:30]} 公式",  # Use first 30 chars of grant name
-                ]
-            else:
-                search_queries = [
-                    f"{grant_name} 公式",
-                    f"{grant_name} 申請",
-                ]
+            ])
+        
+        # Strategy 3: キーワードのみ（最後の手段）
+        if grant_keywords and len(search_queries) < 3:
+            search_queries.append(f"{grant_keywords} 助成金 公式")
         
         # Try up to 3 different search strategies
         max_retries = min(3, len(search_queries))

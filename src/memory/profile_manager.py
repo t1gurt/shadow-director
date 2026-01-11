@@ -150,12 +150,37 @@ class ProfileManager:
         insights = self._profile.get("insights", {})
         
         # Category labels in Japanese
+        # Category labels in Japanese
         category_labels = {
+            # Core Identity & Origin
             "primary_experience": "🌱 原体験",
             "origin_story": "📖 創設ストーリー",
             "mission": "🎯 ミッション",
             "vision": "🌟 ビジョン",
             "values": "💎 価値観",
+            
+            # Organization Details - Individual Fields
+            "org_name": "🏢 団体名",
+            "representative_name": "👤 代表者名",
+            "phone_number": "📞 連絡先電話番号",
+            "website_url": "🌐 ホームページ",
+            "email_address": "📧 メールアドレス",
+            "founding_year": "📅 設立年",
+            "annual_budget": "💰 年間予算",
+            
+            # Legacy organization info (for backward compatibility)
+            "organization_info": "🏢 団体基本情報",
+            "contact_info": "📞 連絡先情報",
+            "staff_info": "👥 スタッフ構成",
+            "finance_info": "💰 財務状況",
+            
+            # Project Concept
+            "project_name": "🚀 プロジェクト名",
+            "project_plan": "📝 プロジェクト計画",
+            "activity_plan": "📅 活動スケジュール",
+            "budget_plan": "💸 予算計画",
+            
+            # Existing specific fields
             "activities": "📋 活動内容",
             "target_beneficiaries": "👥 支援対象",
             "achievements": "🏆 成果・実績",
@@ -167,9 +192,10 @@ class ProfileManager:
         
         # Section groupings
         sections = {
+            "団体詳細情報": ["org_name", "representative_name", "phone_number", "website_url", "email_address", "founding_year", "annual_budget", "organization_info", "contact_info", "staff_info", "finance_info"],
             "コア・アイデンティティ": ["primary_experience", "origin_story", "mission", "vision", "values"],
-            "活動情報": ["activities", "target_beneficiaries", "achievements"],
-            "組織力": ["strengths", "partnerships", "challenges"],
+            "活動・組織力": ["activities", "target_beneficiaries", "achievements", "strengths", "partnerships", "challenges"],
+            "プロジェクト構想": ["project_name", "project_plan", "activity_plan", "budget_plan"],
             "マッチング": ["keywords"]
         }
         

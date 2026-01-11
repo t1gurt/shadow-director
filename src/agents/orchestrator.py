@@ -12,6 +12,7 @@ from src.tools.slide_generator import SlideGenerator
 
 from src.agents.pr_agent import PRAgent
 from src.version import get_version_info
+from src.logic.file_classifier import FileClassifier
 
 
 class Orchestrator:
@@ -24,6 +25,14 @@ class Orchestrator:
         self.system_prompt = self._load_system_prompt()
 
         self.client = self._init_client()
+        
+        # VLMモデル設定を読み込み（Vertex AI経由で使用）
+        # ファイル分類は精度重視のためgemini-3.0-proをデフォルトで使用
+        config = self._load_config()
+        self.vlm_model = config.get("model_config", {}).get("vlm_model", "gemini-3.0-pro")
+        
+        # File Classifier
+        self.file_classifier = FileClassifier(self.client, self.vlm_model)
     
     def _init_client(self):
         """Initialize Gemini client using Vertex AI backend."""
@@ -96,6 +105,7 @@ class Orchestrator:
             if intent.startswith("CLEAR_DRAFTS"): return "CLEAR_DRAFTS"
             if intent.startswith("CLEAR_GRANTS"): return "CLEAR_GRANTS"
             if intent.startswith("VIEW_PROFILE"): return "VIEW_PROFILE"
+            if intent.startswith("UPDATE_PROFILE"): return "UPDATE_PROFILE"
             if intent.startswith("VIEW_GRANTS") or intent.startswith("GRANT_HISTORY"): return "VIEW_GRANTS"
             if intent.startswith("VIEW_DRAFTS"): return "VIEW_DRAFTS"
             if intent.startswith("VIEW") or intent.startswith("LIST"): return "VIEW_DRAFTS"
@@ -169,6 +179,9 @@ class Orchestrator:
 **SNS URLを記憶**
 → 「FacebookのURLを記憶して: [URL]」のように指示
 
+**団体情報を更新**
+→ 「団体名は○○、代表者は△△、設立年は○○年」など
+
 **バージョン**
 → Botのバージョン情報と最新機能を確認
 
@@ -185,173 +198,122 @@ class Orchestrator:
 💡 **ヒント**: 資料やURLを添付すると、より詳しくNPOを理解できます！
 """
 
-
-    def _classify_format_file(self, filename: str, file_path: str = None) -> str:
+    def _handle_update_profile(self, user_message: str, user_id: str) -> str:
         """
-        ファイル名からファイルの用途を判定する。
-        キーワードマッチしない場合はVLMで内容を解析。
-        
-        Args:
-            filename: ファイル名
-            file_path: ファイルパス（VLM解析用）
-            
-        Returns:
-            ファイルの用途を示す文字列
+        ユーザー入力から団体情報を抽出してプロファイルに直接保存する。
+        インタビューを経由せずに情報を登録できる。
         """
-        fn_lower = filename.lower()
+        import json
         
-        # 募集要項・公募要領系（最優先で判定）
-        if any(kw in fn_lower for kw in ['募集要項', '公募要領', '応募要項', '公募要項', '募集案内', '公募案内', 'guidelines', 'requirements']):
-            return "📋 募集要項（応募条件・審査基準が記載）"
-        
-        # 交付要綱・規程系
-        if any(kw in fn_lower for kw in ['交付要綱', '交付規程', '実施要領', 'ガイドライン', 'guideline', '手引き', '手引']):
-            return "📜 交付要綱・ガイドライン（ルール・規程）"
-        
-        # 記入例系（申請書より先に判定）
-        if any(kw in fn_lower for kw in ['記入例', '記載例', '作成例', 'サンプル', 'sample', '見本', '例', 'example']):
-            return "📖 記入例・サンプル（参考資料）"
-        
-        # 申請書・様式系
-        if any(kw in fn_lower for kw in ['申請書', '応募書', '様式', 'フォーマット', 'テンプレート', 'template', 'form', '届出', '調書']):
-            return "📝 申請書フォーマット（記入が必要）"
-        
-        # 予算書系
-        if any(kw in fn_lower for kw in ['予算', '収支', '経費', 'budget', '見積']):
-            return "💰 予算書（金額記入が必要）"
-        
-        # 報告書系
-        if any(kw in fn_lower for kw in ['報告', 'report', '実績']):
-            return "📊 報告書フォーマット"
-        
-        # 事業計画系
-        if any(kw in fn_lower for kw in ['計画', '事業', 'plan', 'project']):
-            return "📋 事業計画書"
-        
-        # チェックリスト系
-        if any(kw in fn_lower for kw in ['チェック', 'check', '確認', 'リスト']):
-            return "✅ チェックリスト"
-        
-        # キーワードで判定できない場合、VLMで解析
-        if file_path and fn_lower.endswith(('.xlsx', '.xls', '.docx', '.doc', '.pdf')):
-            vlm_result = self._classify_file_with_vlm(file_path, filename)
-            if vlm_result:
-                return vlm_result
-        
-        return "📄 関連資料"
-    
-    def _classify_file_with_vlm(self, file_path: str, filename: str) -> str:
-        """
-        VLMを使ってファイル内容から種別を判定する。
-        
-        Args:
-            file_path: ファイルパス
-            filename: ファイル名
-            
-        Returns:
-            ファイルの用途を示す文字列、または None
-        """
         if not self.client:
-            return None
+            return "⚠️ システムエラー: プロファイル更新に失敗しました。"
+        
+        pm = ProfileManager(user_id=user_id)
+        
+        # insight_extractorプロンプトを使って情報を抽出
+        insight_prompt = self.system_prompt.get("insight_extractor", "")
+        
+        # プロファイル更新用にプロンプトを調整
+        prompt = f"""{insight_prompt}
+
+## 入力情報
+ユーザーは以下の団体情報を直接登録したいと述べています：
+「{user_message}」
+
+## 重要な指示
+- 上記のユーザー入力から、団体情報（団体名、代表者名、電話番号、メールアドレス、ホームページ、設立年、年間予算、プロジェクト名など）を抽出してください
+- 明確に述べられている情報のみを抽出してください
+- 推測や補完はしないでください
+
+## 出力形式
+```json
+{{
+  "extracted_insights": [
+    {{"category": "org_name", "content": "団体名"}},
+    {{"category": "representative_name", "content": "代表者名"}},
+    ...
+  ]
+}}
+```
+"""
         
         try:
-            # ファイル内容を抽出
-            content = self._extract_file_content_for_classification(file_path)
-            if not content:
-                return None
-            
-            prompt = f"""
-以下のファイル内容から、このファイルの種類を判定してください。
-
-ファイル名: {filename}
-内容（冒頭部分）:
-{content[:3000]}
-
-以下の選択肢から1つだけ選んで回答してください:
-1. APPLICATION_FORM - 申請書/応募書/様式（記入が必要なフォーマット）
-2. GUIDELINES - 募集要項/公募要領（応募条件や審査基準が記載）
-3. REGULATIONS - 交付要綱/ガイドライン（ルール・規程）
-4. SAMPLE - 記入例/サンプル（参考資料）
-5. BUDGET - 予算書/経費明細
-6. REPORT - 報告書フォーマット
-7. PLAN - 事業計画書
-8. CHECKLIST - チェックリスト
-9. OTHER - その他資料
-
-回答は選択肢の英語キー（例: APPLICATION_FORM）のみを出力してください。
-"""
-            
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=self._load_config().get("model_config", {}).get("router_model", "gemini-3-flash-preview"),
                 contents=prompt
             )
             
-            result = response.text.strip().upper()
+            response_text = response.text.strip()
             
-            # 結果をマッピング
-            mapping = {
-                "APPLICATION_FORM": "📝 申請書フォーマット（記入が必要）",
-                "GUIDELINES": "📋 募集要項（応募条件・審査基準が記載）",
-                "REGULATIONS": "📜 交付要綱・ガイドライン（ルール・規程）",
-                "SAMPLE": "📖 記入例・サンプル（参考資料）",
-                "BUDGET": "💰 予算書（金額記入が必要）",
-                "REPORT": "📊 報告書フォーマット",
-                "PLAN": "📋 事業計画書",
-                "CHECKLIST": "✅ チェックリスト",
+            # JSONを抽出
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0]
+            
+            data = json.loads(response_text)
+            insights = data.get("extracted_insights", [])
+            
+            if not insights:
+                return "⚠️ 入力から団体情報を抽出できませんでした。\n\n以下のような形式でお伝えください：\n- 「団体名は○○」\n- 「代表者は△△」\n- 「電話番号は03-xxxx-xxxx」\n- 「設立年は2020年」"
+            
+            # 抽出した情報をプロファイルに保存
+            updated_items = []
+            category_labels = {
+                "org_name": "団体名",
+                "representative_name": "代表者名",
+                "phone_number": "電話番号",
+                "website_url": "ホームページ",
+                "email_address": "メールアドレス",
+                "founding_year": "設立年",
+                "annual_budget": "年間予算",
+                "project_name": "プロジェクト名",
+                "mission": "ミッション",
+                "vision": "ビジョン",
+                "activities": "活動内容",
+                "target_beneficiaries": "支援対象",
             }
             
-            return mapping.get(result, None)
+            for item in insights:
+                category = item.get("category")
+                content = item.get("content")
+                if category and content:
+                    pm.update_key_insight(category, content)
+                    label = category_labels.get(category, category)
+                    updated_items.append(f"- **{label}**: {content}")
             
+            pm.save()
+            
+            # 更新結果を返す
+            return f"""✅ プロファイルを更新しました！
+
+## 登録した情報
+{chr(10).join(updated_items)}
+
+---
+*「プロフィール」と入力すると、全ての保存済み情報を確認できます。*
+"""
+            
+        except json.JSONDecodeError as e:
+            logging.error(f"[UPDATE_PROFILE] JSON parse error: {e}")
+            return "⚠️ 情報の解析に失敗しました。もう一度お試しください。"
         except Exception as e:
-            logging.warning(f"[ORCHESTRATOR] VLM classification failed: {e}")
-            return None
+            logging.error(f"[UPDATE_PROFILE] Error: {e}")
+            return f"⚠️ プロファイル更新中にエラーが発生しました: {str(e)}"
+
+
+    def _classify_format_file(self, filename: str, file_path: str = None, grant_name: str = None) -> str:
+        """
+        ファイル名からファイルの用途を判定する。
+        ロジックはFileClassifierに委譲。
+        """
+        return self.file_classifier.classify_format_file(filename, file_path, grant_name)
     
-    def _extract_file_content_for_classification(self, file_path: str) -> str:
-        """ファイル内容を抽出（分類用）"""
-        try:
-            ext = os.path.splitext(file_path)[1].lower()
-            
-            if ext in ['.docx', '.doc']:
-                from docx import Document
-                doc = Document(file_path)
-                texts = []
-                for para in doc.paragraphs[:20]:  # 最初の20段落
-                    texts.append(para.text)
-                for table in doc.tables[:3]:  # 最初の3テーブル
-                    for row in table.rows:
-                        texts.append(" | ".join([cell.text.strip() for cell in row.cells]))
-                return "\n".join(texts)
-            
-            elif ext in ['.xlsx', '.xls']:
-                import openpyxl
-                wb = openpyxl.load_workbook(file_path, read_only=True)
-                texts = []
-                for sheet_name in wb.sheetnames[:2]:  # 最初の2シート
-                    sheet = wb[sheet_name]
-                    for row in list(sheet.iter_rows(max_row=20, values_only=True)):
-                        row_text = " | ".join([str(cell) for cell in row if cell])
-                        if row_text:
-                            texts.append(row_text)
-                wb.close()
-                return "\n".join(texts)
-            
-            elif ext == '.pdf':
-                try:
-                    import fitz  # PyMuPDF
-                    doc = fitz.open(file_path)
-                    texts = []
-                    for page_num in range(min(3, doc.page_count)):  # 最初の3ページ
-                        page = doc.load_page(page_num)
-                        texts.append(page.get_text())
-                    doc.close()
-                    return "\n".join(texts)
-                except ImportError:
-                    return None
-            
-        except Exception as e:
-            logging.warning(f"[ORCHESTRATOR] Content extraction failed: {e}")
-        
-        return None
+
+    
+
+    
+
 
     def route_message(self, user_message: str, user_id: str, attachments=None, **kwargs) -> str:
         """
@@ -400,6 +362,10 @@ class Orchestrator:
 *プロファイルを更新するには、会話を続けてください。新しい情報が自動的に反映されます。*
 """
 
+        if intent == "UPDATE_PROFILE":
+            # Update profile directly without interview
+            return self._handle_update_profile(user_message, user_id)
+
 
         if intent == "FIND_RESONANCE":
             # Find resonating NPOs
@@ -436,29 +402,29 @@ class Orchestrator:
 
         if intent == "DRAFT":
             # Create draft and automatically attach file
+            # format_files now contains (file_path, file_name, file_type) tuples - already classified by DrafterAgent
             message, content, filename, format_files, filled_files = self.drafter.create_draft(user_id, user_message)
             
             # Build response with format files first, then draft
+            # format_files is already filtered to only include related files (classified by DrafterAgent)
             response = ""
             if format_files:
                 response += "📎 **申請フォーマットファイル** が見つかりました:\n\n"
                 response += "📑 **ファイル一覧**:\n"
-                for file_path, file_name in format_files:
-                    file_type = self._classify_format_file(file_name, file_path)
+                for file_path, file_name, file_type in format_files:
                     response += f"  • `{file_name}` → {file_type}\n"
                 response += "\n"
-                for file_path, file_name in format_files:
+                for file_path, file_name, _ in format_files:
                     response += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
                 response += "\n"
                 
                 # Word/Excel入力試行結果を通知
-                fillable_count = sum(1 for _, fn in format_files if fn.lower().endswith(('.xlsx', '.xls', '.docx', '.doc')))
+                fillable_count = len([f for f in format_files if f[1].lower().endswith(('.xlsx', '.xls', '.docx', '.doc'))])
                 if fillable_count > 0:
                     if filled_files:
                         response += f"✅ **自動入力**: {len(filled_files)}件のWord/Excelファイルにドラフト内容を入力しました\n\n"
                     else:
                         response += f"ℹ️ **自動入力**: Word/Excelファイル（{fillable_count}件）への入力を試みましたが、入力可能なフィールドが検出できませんでした。マークダウン形式のドラフトをご利用ください。\n\n"
-                
             else:
                 # Notify user that no format files were found
                 response += "ℹ️ 申請フォーマットファイルは見つかりませんでした。一般的な申請書形式でドラフトを作成しました。\n\n"
@@ -767,14 +733,25 @@ URL: {grant_url}
                 message, content, filename, draft_format_files, filled_files = self.drafter.create_draft(user_id, grant_info)
                 
                 if draft_format_files and not format_files:
-                    grant_result += "📎 申請フォーマットファイル:\n"
-                    grant_result += "📑 ファイル一覧:\n"
+                    # Filter files: only include files related to the target grant
+                    related_files = []
                     for file_path, file_name in draft_format_files:
-                        file_type = self._classify_format_file(file_name, file_path)
-                        grant_result += f"  • `{file_name}` → {file_type}\n"
-                    grant_result += "\n"
-                    for file_path, file_name in draft_format_files:
-                        grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+                        file_type = self._classify_format_file(file_name, file_path, grant_title)
+                        if "別の助成金の可能性" not in file_type:
+                            related_files.append((file_path, file_name, file_type))
+                        else:
+                            logging.info(f"[ORCH] Excluding unrelated file from top match: {file_name}")
+                    
+                    if related_files:
+                        grant_result += "📎 申請フォーマットファイル:\n"
+                        grant_result += "📑 ファイル一覧:\n"
+                        for file_path, file_name, file_type in related_files:
+                            grant_result += f"  • `{file_name}` → {file_type}\n"
+                        grant_result += "\n"
+                        for file_path, file_name, _ in related_files:
+                            grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+                    else:
+                        grant_result += "ℹ️ 申請フォーマットファイルは見つかりませんでした（関連性が確認できないファイルは除外）。\n"
                 elif not format_files and not draft_format_files:
                     grant_result += "ℹ️ 申請フォーマットファイルは見つかりませんでした。\n"
                 
