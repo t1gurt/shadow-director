@@ -123,7 +123,9 @@ class DrafterAgent:
         import logging
         from google.genai.types import GenerateContentConfig, Tool, GoogleSearch
         
-        logging.info(f"[DRAFTER] Researching format for: {grant_name}, URL: {grant_url}")
+        # Sanitize grant name to remove user instructions for better search results
+        sanitized_grant_name = self._sanitize_grant_name_for_search(grant_name)
+        logging.info(f"[DRAFTER] Researching format for: {sanitized_grant_name} (Original: {grant_name}), URL: {grant_url}")
         
         # If we have a URL from Observer, try Playwright scraping first
         if grant_url and grant_url != 'N/A':
@@ -146,7 +148,7 @@ class DrafterAgent:
         research_prompt = f"""
 以下の助成金の申請書フォーマット（質問項目・記入欄）を調査してください。
 
-助成金名: {grant_name}
+助成金名: {sanitized_grant_name}
 
 調査すべき内容:
 1. 申請書の質問項目（例：団体概要、事業計画、予算など）
@@ -207,7 +209,7 @@ class DrafterAgent:
                     metadata = response.candidates[0].grounding_metadata
                     if hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
                         # Extract keywords from grant name for URL validation
-                        grant_keywords = self._extract_grant_keywords_for_validation(grant_name)
+                        grant_keywords = self._extract_grant_keywords_for_validation(sanitized_grant_name)
                         logging.info(f"[DRAFTER] Grant keywords for URL validation: {grant_keywords}")
                         
                         for chunk in metadata.grounding_chunks:
@@ -271,7 +273,8 @@ class DrafterAgent:
                 
                 # Fallback: Use Playwright for deep search
                 try:
-                    playwright_files = self._run_playwright_deep_search(grant_name, user_id)
+                    # Pass sanitized name to avoid redundancy, though deep_search sanitizes internally too
+                    playwright_files = self._run_playwright_deep_search(sanitized_grant_name, user_id)
                     if playwright_files:
                         downloaded_files.extend(playwright_files)
                         summary = "\n\n---\n## 📎 Playwright深掘り検索の結果\n\n"
@@ -614,27 +617,59 @@ class DrafterAgent:
             import nest_asyncio
             nest_asyncio.apply()
             
-            # Extract organization name for targeted search
+            # Sanitize grant_name: remove command-like phrases that shouldn't be in search
+            sanitized_grant_name = self._sanitize_grant_name_for_search(grant_name)
+            
+            search_attempts = []
+            
+            # Application file extensions to search for
+            file_extensions = "filetype:pdf OR filetype:docx OR filetype:xlsx OR filetype:doc OR filetype:xls"
+            
+            # Attempt 1: Search with the exact sanitized grant name (User Request priority)
+            # This is the most specific search and should be tried first
+            if sanitized_grant_name:
+                q1 = f'"{sanitized_grant_name}" 申請書 様式 {file_extensions}'
+                search_attempts.append({
+                    "query": q1,
+                    "desc": "Exact grant name"
+                })
+            
+            # Attempt 2: Search with Organization Name + Grant Name (Fallback)
+            # Only if org_name is available
             from src.logic.grant_validator import GrantValidator
             validator = GrantValidator()
             org_name = validator.extract_organization_name(grant_name)
             
-            if not org_name:
-                logging.info("[DRAFTER] Could not extract organization name for Playwright search")
+            if org_name and org_name not in sanitized_grant_name:
+                q2 = f'"{org_name}" "{sanitized_grant_name}" 申請書 様式 {file_extensions}'
+                search_attempts.append({
+                    "query": q2,
+                    "desc": "Org name + Grant name"
+                })
+            
+            if not search_attempts:
+                logging.warning("[DRAFTER] No valid search queries could be constructed")
                 return []
             
-            # Sanitize grant_name: remove command-like phrases that shouldn't be in search
-            sanitized_grant_name = self._sanitize_grant_name_for_search(grant_name)
+            # Execute searches in order
+            for i, attempt in enumerate(search_attempts):
+                query = attempt["query"]
+                desc = attempt["desc"]
+                search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+                
+                logging.info(f"[DRAFTER] Deep search attempt {i+1}/{len(search_attempts)} ({desc}): {query[:50]}...")
+                
+                # Execute async search
+                found_files = asyncio.run(self._async_playwright_deep_search(search_url, grant_name, user_id))
+                
+                if found_files:
+                    logging.info(f"[DRAFTER] Found {len(found_files)} files in attempt {i+1}")
+                    return found_files
+                
+                logging.info(f"[DRAFTER] Attempt {i+1} found no files")
             
-            # Build more specific search URL with grant name for better targeting
-            # Include both organization name and grant name for more precise results
-            search_query = f'"{org_name}" "{sanitized_grant_name}" 申請書 様式 filetype:pdf OR filetype:docx OR filetype:xlsx'
-            search_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
-            
-            logging.info(f"[DRAFTER] Playwright deep search for: {grant_name} (org: {org_name})")
-            
-            # Now we can safely run asyncio.run() within the existing event loop
-            return asyncio.run(self._async_playwright_deep_search(search_url, grant_name, user_id))
+            logging.info("[DRAFTER] All search attempts failed to find format files")
+            return []
             
         except Exception as e:
             logging.error(f"[DRAFTER] Playwright deep search error: {e}")

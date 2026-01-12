@@ -4,11 +4,13 @@ Shadow Director Version Information
 """
 
 # バージョン情報
-__version__ = "1.8.6"
-__update_date__ = "2026-01-11"
+__version__ = "1.8.7"
+__update_date__ = "2026-01-12"
 
 # 最新の追加機能リスト
 LATEST_FEATURES = [
+    # v1.8.7 - Playwrightスクレイピング
+    "Playwrightスクレイピング機能を追加",
     # v1.8.6 - URL判定改善
     "URL判定をFQDN（ドメイン名）ベースに改善（urlparseでドメインとパスを分離）",
     ".jpドメイン全般を信頼ドメインとして許可",
