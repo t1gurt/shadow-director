@@ -226,6 +226,7 @@ class DrafterAgent:
                                         pass
                                 
                                 # Validate URL relevance before exploring
+                                logging.info(f"[DRAFTER] Analyzing search result URL: {page_url} (Keywords: {grant_keywords})")
                                 if not self._is_url_relevant_to_grant(page_url, grant_keywords):
                                     logging.info(f"[DRAFTER] Skipping unrelated URL: {page_url}")
                                     continue
@@ -753,10 +754,14 @@ class DrafterAgent:
             if match:
                 grant_name = match.group(0)
         
+        # Sanitize the grant name to remove instructions like "のドラフトを作成して"
+        original_grant_name = grant_name
+        grant_name = self._sanitize_grant_name_for_search(grant_name)
+        
         # Create display name (max 20 chars) for notifications
         grant_display_name = grant_name[:20] + "..." if len(grant_name) > 20 else grant_name
         
-        logging.info(f"[DRAFTER] Grant name: {grant_name}, URL: {grant_url}")
+        logging.info(f"[DRAFTER] Grant name: {grant_name} (Original: {original_grant_name}), URL: {grant_url}")
         
         # Start notification
         notifier.notify_sync(

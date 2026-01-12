@@ -394,10 +394,24 @@ class GrantPageScraper:
                     score += 10
             
             if grant_name:
-                grant_name_parts = grant_name.split()[:3]
-                for part in grant_name_parts:
-                    if len(part) >= 2 and part.lower() in combined:
+                # Improved splitting for Japanese names (handle dots and full-width spaces)
+                import re
+                grant_name_parts = re.split(r'[・\s　]+', grant_name)
+                # Filter out short parts and usage of parens
+                valid_parts = [p for p in grant_name_parts if len(p) >= 2]
+                
+                # Check for matches
+                matches = 0
+                for part in valid_parts:
+                    # Remove tokens inside parentheses for cleaner matching
+                    clean_part = re.sub(r'[（(【「].*?([)）】」]|$)', '', part)
+                    if len(clean_part) >= 2 and clean_part.lower() in combined:
                         score += 5
+                        matches += 1
+                
+                # Bonus if multiple parts match (high confidence)
+                if matches >= 2:
+                    score += 10
             
             if score > 0:
                 scored_links.append({

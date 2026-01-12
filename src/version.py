@@ -4,11 +4,17 @@ Shadow Director Version Information
 """
 
 # バージョン情報
-__version__ = "1.8.7"
+__version__ = "1.9.0"
 __update_date__ = "2026-01-12"
 
 # 最新の追加機能リスト
 LATEST_FEATURES = [
+    # v1.9.0 - テーブル内短文記述改善(ドラフト安定板)
+    "テーブル内短文記述の制限を緩和（短い単語、体言止め、またはコマンド的な表現）",
+    # v1.8.9 - ログ改善
+    "Playwrightスクレイピング機能を追加",
+    # v1.8.8 - OfficeファイルPDF変換
+    "Officeファイル（Word, Excel）をPDFに変換する機能を追加",
     # v1.8.7 - Playwrightスクレイピング
     "Playwrightスクレイピング機能を追加",
     # v1.8.6 - URL判定改善

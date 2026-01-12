@@ -9,6 +9,11 @@ import logging
 import json
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
+import os
+
+from google import genai
+from google.genai import types
+from src.utils.office_utils import convert_to_pdf
 
 
 @dataclass
@@ -156,43 +161,165 @@ class FormatFieldMapper:
         
         return fields
     
+
+
+    def _analyze_word_with_pdf_vlm(self, file_path: str) -> List[FieldInfo]:
+        """PDF変換を介してWordドキュメントをVLM解析する（.doc対応）"""
+        fields = []
+        try:
+            # 1. Word -> PDF変換
+            self.logger.info(f"[FORMAT_MAPPER] Converting Word to PDF for VLM: {file_path}")
+            pdf_path = convert_to_pdf(file_path)
+            
+            if not pdf_path:
+                self.logger.warning("[FORMAT_MAPPER] PDF conversion failed")
+                return fields
+                
+            # 2. PDFをVLMに送信
+            import pathlib
+            pdf_data = pathlib.Path(pdf_path).read_bytes()
+            
+            prompt = """
+この申請書の画像から、記入が必要なフィールド（入力欄）を全て抽出してください。
+以下の情報をJSON形式で出力してください:
+[
+  {
+    "field_id": "ユニークなID",
+    "field_name": "項目名",
+    "description": "入力内容の説明や制約",
+    "max_length": "文字数制限（あれば数値、なければnull）",
+    "input_length_type": "short または long"
+  }
+]
+"""
+            contents = [
+                types.Part(
+                    inline_data=types.Blob(
+                        mime_type="application/pdf",
+                        data=pdf_data
+                    )
+                ),
+                types.Part(text=prompt)
+            ]
+            
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=8192,
+                    temperature=0.1
+                )
+            )
+            
+            # JSONパース
+            response_text = response.text.strip()
+            # Markdownコードブロック除去
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0]
+                
+            data = json.loads(response_text)
+            
+            if isinstance(data, list):
+                for i, item in enumerate(data):
+                    field = FieldInfo(
+                        field_id=item.get("field_id", f"vlm_pdf_{i}"),
+                        field_name=item.get("field_name", "不明"),
+                        field_type="vlm_detected",
+                        description=item.get("description"),
+                        max_length=item.get("max_length"),
+                        input_length_type=item.get("input_length_type", "short"),
+                        location={"source": "pdf_vlm", "index": i}
+                    )
+                    fields.append(field)
+            
+            self.logger.info(f"[FORMAT_MAPPER] PDF VLM found {len(fields)} fields")
+            
+            # クリーンアップ（PDF削除）
+            try:
+                os.remove(pdf_path)
+            except:
+                pass
+                
+        except Exception as e:
+            self.logger.error(f"[FORMAT_MAPPER] PDF VLM analysis failed: {e}")
+            
+        return fields
+
     def analyze_word_fields(self, file_path: str) -> List[FieldInfo]:
         """
         Wordファイルのフィールドを解析する。
-        
-        Args:
-            file_path: Wordファイルのパス
-            
-        Returns:
-            検出されたフィールドのリスト
         """
         fields = []
+        
+        # .doc (バイナリ形式) の場合は直接PDF変換VLMへ
+        if file_path.lower().endswith('.doc'):
+            self.logger.info(f"[FORMAT_MAPPER] Detected .doc file, using PDF VLM analysis: {file_path}")
+            if self.client:
+                return self._analyze_word_with_pdf_vlm(file_path)
+            else:
+                self.logger.warning("[FORMAT_MAPPER] .doc file detected but VLM client is not active")
+                return []
         
         try:
             from docx import Document
             
             doc = Document(file_path)
             
+            # ドキュメント要素（段落とテーブル）の順序を構築（行コンテキスト判定用）
+            block_items = []
+            try:
+                # python-docxの内部要素にアクセスして順序を特定
+                from docx.oxml.text.paragraph import CT_P
+                from docx.oxml.table import CT_Tbl
+                
+                p_iter = iter(doc.paragraphs)
+                t_iter = iter(doc.tables)
+                p_idx = 0
+                t_idx = 0
+                
+                # body内の要素を順に走査
+                for child in doc.element.body.iterchildren():
+                    if isinstance(child, CT_P):
+                        try:
+                            block_items.append({"type": "paragraph", "obj": next(p_iter), "index": p_idx})
+                            p_idx += 1
+                        except StopIteration:
+                            break
+                    elif isinstance(child, CT_Tbl):
+                        try:
+                            block_items.append({"type": "table", "obj": next(t_iter), "index": t_idx})
+                            t_idx += 1
+                        except StopIteration:
+                            break
+            except Exception as e:
+                self.logger.warning(f"[FORMAT_MAPPER] Failed to build block items logic: {e}")
+                # フォールバック: 段落のみのリスト作成
+                block_items = [{"type": "paragraph", "obj": p, "index": i} for i, p in enumerate(doc.paragraphs)]
+
             # テーブルからフィールドを検出
             for table_idx, table in enumerate(doc.tables):
                 table_fields = self._analyze_word_table(table, table_idx)
                 fields.extend(table_fields)
             
-            # 段落からフィールドを検出（下線やプレースホルダー）
-            paragraph_fields = self._analyze_word_paragraphs(doc.paragraphs)
+            # 段落からフィールドを検出（順序情報を渡す）
+            paragraph_fields = self._analyze_word_paragraphs(doc.paragraphs, block_items)
             fields.extend(paragraph_fields)
             
             self.logger.info(f"[FORMAT_MAPPER] Found {len(fields)} fields in Word file (text-based)")
             
             # テキストベースで検出できなかった場合、VLMでドキュメント全体を解析
             if not fields and self.client:
-                self.logger.info("[FORMAT_MAPPER] No fields found with text-based analysis, trying VLM...")
-                fields = self._analyze_word_with_vlm(doc, file_path)
-            
-            # VLMでも検出できなかった場合、全テーブルセルを強制的に入力候補として検出
-            if not fields and doc.tables:
-                self.logger.info("[FORMAT_MAPPER] VLM also failed, using fallback: all table cells")
-                fields = self._fallback_word_all_cells(doc)
+                self.logger.info("[FORMAT_MAPPER] No fields found with text-based analysis, trying VLM (PDF-based)...")
+                # PDF変換VLMを優先
+                fields = self._analyze_word_with_pdf_vlm(file_path)
+                
+                # 失敗時は従来のテキストベースVLMへ
+                if not fields:
+                     self.logger.info("[FORMAT_MAPPER] PDF VLM returned no fields, falling back to text-based VLM...")
+                     fields = self._analyze_word_with_vlm(doc, file_path)
             
             # VLMで追加解析（フィールドの意味を推論）
             if fields and self.client:
@@ -202,6 +329,10 @@ class FormatFieldMapper:
             self.logger.warning("[FORMAT_MAPPER] python-docx not installed")
         except Exception as e:
             self.logger.error(f"[FORMAT_MAPPER] Word analysis failed: {e}")
+            # エラー時（.docなど）のフォールバック
+            if self.client and not fields:
+                self.logger.info("[FORMAT_MAPPER] Attempting PDF VLM fallback after error...")
+                fields = self._analyze_word_with_pdf_vlm(file_path)
         
         return fields
     
@@ -598,11 +729,37 @@ class FormatFieldMapper:
             return fields
         
         # ヘッダー行パターンが確定 → 各データ行の各セルをフィールドとして登録
+        
+        # まず、入力対象外とする列を判定する
+        # その列のデータ行いずれかに値（プレースホルダー以外）が入っている場合、その列は「計算式」や「記入済み」とみなして除外
+        excluded_col_indices = set()
+        for col_idx in range(len(header_texts)):
+            is_column_prefilled = False
+            for row_idx in range(1, len(rows)):
+                if col_idx < len(rows[row_idx].cells):
+                    cell_text = rows[row_idx].cells[col_idx].text.strip()
+                    # 空でもプレースホルダーでもない場合、何らかの値が入っている
+                    is_empty = not cell_text
+                    is_placeholder = cell_text and (
+                        all(c in '_＿　 ' for c in cell_text) or
+                        cell_text in ['（　）', '(　)', '（）', '()']
+                    )
+                    if not is_empty and not is_placeholder:
+                        is_column_prefilled = True
+                        break
+            
+            if is_column_prefilled:
+                excluded_col_indices.add(col_idx)
+        
         for row_idx in range(1, len(rows)):
             row = rows[row_idx]
             cells = row.cells
             
             for col_idx, cell in enumerate(cells):
+                # 入力対象外の列はスキップ
+                if col_idx in excluded_col_indices:
+                    continue
+                
                 # ヘッダーのラベルを取得
                 if col_idx < len(header_texts):
                     header_label = header_texts[col_idx]
@@ -610,6 +767,7 @@ class FormatFieldMapper:
                     header_label = f"列{col_idx + 1}"
                 
                 # 既に値が入っているセルはスキップ（入力欄として認識しない）
+                # ※列除外ロジックを入れたので、ここは念の為の二重チェック
                 cell_text = cell.text.strip()
                 is_empty = not cell_text
                 is_placeholder = cell_text and (
@@ -618,8 +776,18 @@ class FormatFieldMapper:
                 )
                 
                 if is_empty or is_placeholder:
-                    # 行番号をラベルに含める（複数行がある場合の区別）
-                    field_name = f"{header_label}（行{row_idx}）" if len(rows) > 2 else header_label
+                    # 行コンテキストの決定（左端列の値を使用するか、行番号を使用するか）
+                    row_context = f"行{row_idx}"
+                    # 左端のセル（列0）にテキストがあれば、それを行ラベルとして使用する
+                    if len(cells) > 0:
+                        first_cell_text = cells[0].text.strip()
+                        # テキストがあり、かつ長すぎない（ラベルとして成立する）場合
+                        if first_cell_text and len(first_cell_text) < 50:
+                            # 括弧や改行を整理
+                            row_context = first_cell_text.replace('\n', ' ').strip()
+                    
+                    # 行番号または行ラベルをラベルに含める
+                    field_name = f"{header_label}（{row_context}）" if len(rows) > 2 else header_label
                     
                     field = FieldInfo(
                         field_id=f"table{table_idx}_{row_idx}_{col_idx}",
@@ -637,10 +805,14 @@ class FormatFieldMapper:
         
         return fields
     
-    def _analyze_word_paragraphs(self, paragraphs) -> List[FieldInfo]:
+    def _analyze_word_paragraphs(self, paragraphs, block_items=None) -> List[FieldInfo]:
         """
         Word段落からフィールドを検出。
         
+        Args:
+            paragraphs: 段落オブジェクトのリスト
+            block_items: ドキュメント要素の順序リスト（任意）
+            
         対応パターン:
         - ラベル：____（下線プレースホルダー）
         - ラベル：（入力してください）
@@ -651,6 +823,13 @@ class FormatFieldMapper:
         - 入れ子質問: 4. 親質問 → ①サブ項目（文字数制限）
         """
         fields = []
+        
+        # block_itemsが渡されていない場合の簡易マッピング
+        para_to_block_idx = {}
+        if block_items:
+            for idx, item in enumerate(block_items):
+                if item["type"] == "paragraph":
+                    para_to_block_idx[item["index"]] = idx
         
         try:
             import re
@@ -665,6 +844,18 @@ class FormatFieldMapper:
                 if not text or len(text) < 3:
                     continue
                 
+                # 次の要素がテーブルかどうかを確認するヘルパー
+                def is_next_element_table(current_para_idx):
+                    if not block_items or current_para_idx not in para_to_block_idx:
+                        return False
+                    
+                    current_block_idx = para_to_block_idx[current_para_idx]
+                    if current_block_idx + 1 < len(block_items):
+                        next_item = block_items[current_block_idx + 1]
+                        if next_item["type"] == "table":
+                            return True
+                    return False
+
                 # 入れ子パターン: サブ項目を検出 ①②③, (1)(2)(3), ア.イ.ウ. 等
                 sub_item_match = re.match(r'^[　\s]*([①②③④⑤⑥⑦⑧⑨⑩]|[(（][1-9１-９][)）]|[ア-オ][.．])(.+?)([（(]\d+字?以?内?[)）])?$', text)
                 if sub_item_match and parent_question:
@@ -675,6 +866,10 @@ class FormatFieldMapper:
                     # 親質問名とサブ項目名を組み合わせる
                     combined_label = f"{parent_question} - {sub_marker}{sub_label}"
                     
+                    # 次がテーブルなら、この段落は入力欄ではない（テーブルが入力欄）
+                    if is_next_element_table(para_idx):
+                        continue
+
                     field = FieldInfo(
                         field_id=f"para_{para_idx + 1}",  # 次の段落が入力欄
                         field_name=combined_label,
@@ -725,7 +920,8 @@ class FormatFieldMapper:
                     parent_question_idx = para_idx
                     
                     # 文字数制限がある場合は直接の入力欄
-                    if char_limit:
+                    # ただし、次がテーブルなら入力をスキップ（テーブル側で処理）
+                    if char_limit and not is_next_element_table(para_idx):
                         field = FieldInfo(
                             field_id=f"para_{para_idx + 1}",
                             field_name=label,
@@ -781,6 +977,10 @@ class FormatFieldMapper:
                 # パターン5: コロン終端（次行入力）
                 colon_end_match = re.match(r'^(.+?)[:：]\s*$', text)
                 if colon_end_match:
+                    # 次がテーブルならスキップ
+                    if is_next_element_table(para_idx):
+                        continue
+
                     field = FieldInfo(
                         field_id=f"para_{para_idx + 1}",  # 次の段落
                         field_name=colon_end_match.group(1).strip(),
@@ -789,6 +989,36 @@ class FormatFieldMapper:
                             "paragraph_idx": para_idx + 1,
                             "input_type": "next_line"
                         }
+                    )
+                    fields.append(field)
+                    continue
+
+                # パターン6: 見出し + 空行（記述式の可能性大）
+                # 条件: 短いテキストで終わり、次の段落が空、かつキーワードを含む
+                next_para_text = paragraphs[para_idx + 1].text.strip() if para_idx + 1 < len(paragraphs) else ""
+                
+                # キーワード判定（質問や項目名っぽいもの）
+                is_question_header = any(k in text for k in ['について', '教えて', '概要', '内容', '理由', '目的', '計画', '戦略', '課題', '成果', '詳細'])
+                
+                # 末尾が「：」や「?」で終わる、または番号付き
+                is_header_style = text.endswith(('：', ':', '？', '?')) or re.match(r'^[\d①-⑩]+[\.．]', text)
+                
+                if (is_question_header or is_header_style) and not next_para_text:
+                    # 次がテーブルならスキップ
+                    if is_next_element_table(para_idx):
+                        continue
+
+                    # 次の段落が空 = 入力スペースとみなす
+                    field = FieldInfo(
+                        field_id=f"para_{para_idx + 1}",
+                        field_name=f"{text}（記述）",
+                        field_type="paragraph",
+                        location={
+                            "paragraph_idx": para_idx + 1,
+                            "input_type": "next_line_narrative"
+                        },
+                        description="200-600文字程度の詳細な記述",
+                        input_length_type="long"
                     )
                     fields.append(field)
                     continue
@@ -847,15 +1077,17 @@ class FormatFieldMapper:
   ...
 ]
 
-■ input_length_type の判定基準:
-- "short": 1行以内の短い入力（名前、日付、金額、電話番号、選択肢など）
-  - テーブルセルで列幅が狭いもの
-  - 数値、日付、コード、ID類
-  - 「〇〇名」「〇〇年月日」「〇〇番号」などの項目名
-- "long": 100文字以上の長文入力（説明文、概要、理由、計画など）
-  - 「概要」「説明」「理由」「目的」「計画」「内容」を含む項目名
-  - テーブルセルで広いスペースがあるもの
-  - 自由記述欄
+■ input_length_type (入力タイプ) の判定基準:
+- "short" (デフォルト): 
+  - 基本的に全てのテーブル入力は "short" と判定してください。
+  - 名前、日付、金額、電話番号、選択肢、短い文章など、1行で収まる内容。
+- "long": 
+  - 項目名に「概要」「説明」「理由」「目的」「計画」「内容」など、明らかに長文記述を求めている単語が含まれる場合のみ "long" と判定してください。
+
+■ 重要: 数値項目（金額・数量など）の制約:
+- 項目名が「金額」「価格」「数量」「人数」「単価」などの数値を示す場合:
+- description には必ず「数値、空、または"未定"のみ入力可能」という旨を記載してください。
+- 単位（円、人など）が分かる場合はそれも記載してください。
 
 JSONのみを出力してください。
 """
@@ -979,7 +1211,7 @@ JSONのみを出力してください。
         try:
             # フィールド情報をプロンプト用にフォーマット
             fields_prompt = "\n".join([
-                f"- field_id: {f.field_id}\n  名前: {f.field_name}\n  説明: {f.description or '不明'}\n  文字数制限: {f.max_length or '制限なし'}"
+                f"- field_id: {f.field_id}\n  名前: {f.field_name}\n  説明: {f.description or '不明'}\n  文字数制限: {f.max_length or '制限なし'}\n  入力タイプ: {f.input_length_type}"
                 for f in fields
             ])
             
@@ -1006,6 +1238,17 @@ JSONのみを出力してください。
 - 各フィールドの文字数制限を守ってください
 - ドラフトに該当する内容がない場合は空文字列にしてください
 - JSONのみを出力してください
+
+■ 重要: 計算処理
+- 「小計」や「合計」という名前のフィールドは、あなたが入力した他の数値フィールド（単価×数量など）の合計値を**必ず計算してその値を記入**してください。空欄にしてはいけません。
+
+■ 重要: 長文記述
+- 入力タイプが "long" のフィールド（「概要」「理由」「計画」など）は、ドラフトの内容を元に、必ず**200〜600文字程度の具体的で詳細な文章**を生成してください。
+- "TBD" や "詳細は後日決定" などの短文で逃げないでください。不足している情報は、それらしい内容を補完してでもドラフトを埋めてください。
+
+■ 重要: 短文記述（テーブル内など）
+- 入力タイプが "short" のフィールドについては、決して「...」や「省略」を使わないでください。
+- 長くなる場合は、**短い単語、体言止め、またはコマンド的な表現**（例：「Xを実施」「Yを確認」）に言い換えて、必ず枠内に収まる表現を生成してください。
 """
             
             response = self.client.models.generate_content(
