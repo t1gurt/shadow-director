@@ -32,7 +32,8 @@ echo "Step 0: Enabling Required APIs..."
 echo "------------------------------------------------"
 gcloud services enable docs.googleapis.com --project=$PROJECT_ID
 gcloud services enable drive.googleapis.com --project=$PROJECT_ID
-echo "✅ Google Docs & Drive APIs enabled"
+gcloud services enable aiplatform.googleapis.com --project=$PROJECT_ID
+echo "✅ Google Docs, Drive, and Vertex AI APIs enabled"
 
 # 1. Build and Push Container Image
 echo "------------------------------------------------"
@@ -41,6 +42,11 @@ echo "------------------------------------------------"
 gcloud builds submit --tag $IMAGE_NAME
 
 # 2. Deploy to Cloud Run
+# Optional: Set this to your Agent Engine ID if you have one created
+# If not set, the app will try to find or create one automatically (which may fail if permissions are insufficient)
+# Run 'python3 setup_agent_engine.py' locally to create/get an ID
+AGENT_ENGINE_ID="" 
+
 echo "------------------------------------------------"
 echo "Step 2: Deploying to Cloud Run..."
 echo "------------------------------------------------"
@@ -49,8 +55,12 @@ gcloud run deploy $SERVICE_NAME \
     --region $REGION \
     --platform managed \
     --allow-unauthenticated \
-    --memory 1Gi \
-    --set-env-vars "APP_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=True,GCS_BUCKET_NAME=$GCS_BUCKET,DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN"
+    --memory 3Gi \
+    --cpu 2 \
+    --min-instances 1 \
+    --max-instances 1 \
+    --cpu-boost \
+    --set-env-vars "APP_ENV=production,GCP_PROJECT=$PROJECT_ID,GCP_LOCATION=global,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=True,GCS_BUCKET_NAME=$GCS_BUCKET,DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN,USE_MEMORY_BANK=False,GOOGLE_CLOUD_AGENT_ENGINE_ID=$AGENT_ENGINE_ID"
 
 echo "------------------------------------------------"
 echo "Step 3: Configuring Service Account Permissions..."
@@ -90,3 +100,5 @@ echo ""
 echo "------------------------------------------------"
 echo "Deployment Completed Successfully! 🎉"
 echo "------------------------------------------------"
+echo "Deployment completed at: $(TZ='Asia/Tokyo' date '+%Y-%m-%d %H:%M:%S %Z')"
+echo ""

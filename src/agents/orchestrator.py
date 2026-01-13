@@ -10,24 +10,38 @@ from src.agents.drafter import DrafterAgent
 from src.memory.profile_manager import ProfileManager
 from src.tools.slide_generator import SlideGenerator
 
+from src.agents.pr_agent import PRAgent
+from src.version import get_version_info
+from src.logic.file_classifier import FileClassifier
+
+
 class Orchestrator:
     def __init__(self):
         self.interviewer = InterviewerAgent()
         self.observer = ObserverAgent()
         self.drafter = DrafterAgent()
+        self.pr_agent = PRAgent()
         self.slide_generator = SlideGenerator()
         self.system_prompt = self._load_system_prompt()
 
         self.client = self._init_client()
+        
+        # VLMモデル設定を読み込み（Vertex AI経由で使用）
+        # ファイル分類は精度重視のためgemini-3.0-proをデフォルトで使用
+        config = self._load_config()
+        self.vlm_model = config.get("model_config", {}).get("vlm_model", "gemini-3.0-pro")
+        
+        # File Classifier
+        self.file_classifier = FileClassifier(self.client, self.vlm_model)
     
     def _init_client(self):
+        """Initialize Gemini client using Vertex AI backend."""
         try:
-            # Using Flash for routing (Router) as it needs to be fast
-            from google import genai
-            from google.genai.types import HttpOptions
-            return genai.Client(http_options=HttpOptions(api_version="v1beta1"))
-        except:
-             return None
+            from src.utils.gemini_client import get_gemini_client
+            return get_gemini_client()
+        except Exception as e:
+            logging.error(f"[ORCHESTRATOR] Failed to initialize Gemini client: {e}")
+            return None
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -59,32 +73,79 @@ class Orchestrator:
                 contents=prompt
             )
             intent = response.text.strip().upper()
+            
+            # Debug logging for intent classification
+            logging.info(f"[INTENT] User: '{user_message}' → Model returned: '{intent}'")
+            
+            # Handle empty or invalid response with keyword-based fallback
+            if not intent or len(intent) == 0:
+                logging.warning(f"[INTENT] Empty response from model, using keyword fallback")
+                # Keyword-based fallback for critical intents
+                msg_lower = user_message.lower()
+                if "助成金" in msg_lower and ("探して" in msg_lower or "検索" in msg_lower or "見つけて" in msg_lower):
+                    logging.info(f"[INTENT] Fallback: Detected OBSERVE intent via keywords")
+                    return "OBSERVE"
+                elif "バージョン" in msg_lower or "version" in msg_lower:
+                    logging.info(f"[INTENT] Fallback: Detected VERSION intent via keywords")
+                    return "VERSION"
+                elif "ヘルプ" in msg_lower or "help" in msg_lower:
+                    logging.info(f"[INTENT] Fallback: Detected HELP intent via keywords")
+                    return "HELP"
+                elif "ドラフト" in msg_lower and "書いて" in msg_lower:
+                    logging.info(f"[INTENT] Fallback: Detected DRAFT intent via keywords")
+                    return "DRAFT"
+                else:
+                    logging.info(f"[INTENT] Fallback: No keywords matched, defaulting to INTERVIEW")
+                    return "INTERVIEW"
+            
             # Use exact match or startswith to avoid overlap issues
-            if intent.startswith("HELP"): return "HELP"
-            if intent.startswith("UNKNOWN"): return "UNKNOWN"
+            # Check specific intents BEFORE generic ones like HELP/UNKNOWN
             if intent.startswith("DETAIL_GRANT"): return "DETAIL_GRANT"
             if intent.startswith("FIND_RESONANCE"): return "FIND_RESONANCE"
             if intent.startswith("CLEAR_DRAFTS"): return "CLEAR_DRAFTS"
             if intent.startswith("CLEAR_GRANTS"): return "CLEAR_GRANTS"
             if intent.startswith("VIEW_PROFILE"): return "VIEW_PROFILE"
+            if intent.startswith("UPDATE_PROFILE"): return "UPDATE_PROFILE"
             if intent.startswith("VIEW_GRANTS") or intent.startswith("GRANT_HISTORY"): return "VIEW_GRANTS"
             if intent.startswith("VIEW_DRAFTS"): return "VIEW_DRAFTS"
             if intent.startswith("VIEW") or intent.startswith("LIST"): return "VIEW_DRAFTS"
             if intent.startswith("DRAFT"): return "DRAFT"
             if intent.startswith("OBSERVE"): return "OBSERVE"
+            
+            # PR Agent Intents
+            if intent.startswith("PR_REMEMBER_SNS"): return "PR_REMEMBER_SNS"
+            if intent.startswith("PR_MONTHLY_SUMMARY"): return "PR_MONTHLY_SUMMARY"
+            if intent.startswith("PR_CREATE_POST"): return "PR_CREATE_POST"
+            if intent.startswith("PR_SEARCH_RELATED"): return "PR_SEARCH_RELATED"
+            
+            # Version Intent - check BEFORE HELP/UNKNOWN
+            if intent.startswith("VERSION"): return "VERSION"
+            
+            # Generic intents - check LAST
+            if intent.startswith("HELP"): return "HELP"
             if intent.startswith("INTERVIEW"): return "INTERVIEW"
+            if intent.startswith("UNKNOWN"): return "UNKNOWN"
+            
             return "UNKNOWN"  # Default to UNKNOWN for unclear intents
 
 
         except Exception as e:
-            print(f"Routing error: {e}")
+            logging.error(f"[INTENT] Routing error: {e}", exc_info=True)
+            # Keyword-based fallback on exception
+            msg_lower = user_message.lower()
+            if "助成金" in msg_lower and ("探して" in msg_lower or "検索" in msg_lower):
+                logging.info(f"[INTENT] Exception fallback: OBSERVE")
+                return "OBSERVE"
+            elif "バージョン" in msg_lower or "version" in msg_lower:
+                logging.info(f"[INTENT] Exception fallback: VERSION")
+                return "VERSION"
             return "UNKNOWN"
 
     def _get_help_message(self) -> str:
         """Returns the help message with all available commands."""
         return """# 🤖 Shadow Director - 機能一覧
 
-**Shadow Director**はNPOの資金調達を支援するAIアシスタントです。
+**Shadow Director**はNPOの資金調達と広報活動を支援するAIアシスタントです。
 
 ---
 
@@ -102,17 +163,27 @@ class Orchestrator:
 **助成金を探して**
 → あなたのNPOに合った助成金を検索
 
-**○○について詳しく調べて**
-→ 指定した助成金の詳細と5軸評価を表示
-
 **ドラフトを書いて**
 → 助成金申請書のドラフトを自動生成
 
-**ドラフト一覧** / **ドラフトをクリア**
-→ ドラフトの一覧表示・削除
+**投稿記事を作って**
+→ Facebook/Instagram用の投稿記事ドラフトを作成
+(写真やイベント詳細を一緒に送信してください)
 
-**提案済み助成金** / **助成金履歴をクリア**
-→ 助成金履歴の表示・リセット
+**月次サマリ**
+→ 今月の活動サマリレポートを作成
+
+**関連情報を探して**
+→ 興味のあるキーワードで最新情報を検索
+
+**SNS URLを記憶**
+→ 「FacebookのURLを記憶して: [URL]」のように指示
+
+**団体情報を更新**
+→ 「団体名は○○、代表者は△△、設立年は○○年」など
+
+**バージョン**
+→ Botのバージョン情報と最新機能を確認
 
 ---
 
@@ -120,22 +191,145 @@ class Orchestrator:
 
 1️⃣ **まずは自己紹介** - NPOの活動内容を教えてください
 2️⃣ **助成金を探す** - 「助成金を探して」と言ってください
-3️⃣ **ドラフト作成** - 共鳴度70以上の助成金には自動でドラフトが作成されます
+3️⃣ **広報支援** - イベントの写真などを送って「記事を作って」
 
 ---
 
 💡 **ヒント**: 資料やURLを添付すると、より詳しくNPOを理解できます！
 """
 
+    def _handle_update_profile(self, user_message: str, user_id: str) -> str:
+        """
+        ユーザー入力から団体情報を抽出してプロファイルに直接保存する。
+        インタビューを経由せずに情報を登録できる。
+        """
+        import json
+        
+        if not self.client:
+            return "⚠️ システムエラー: プロファイル更新に失敗しました。"
+        
+        pm = ProfileManager(user_id=user_id)
+        
+        # insight_extractorプロンプトを使って情報を抽出
+        insight_prompt = self.system_prompt.get("insight_extractor", "")
+        
+        # プロファイル更新用にプロンプトを調整
+        prompt = f"""{insight_prompt}
 
-    def route_message(self, user_message: str, user_id: str, **kwargs) -> str:
+## 入力情報
+ユーザーは以下の団体情報を直接登録したいと述べています：
+「{user_message}」
+
+## 重要な指示
+- 上記のユーザー入力から、団体情報（団体名、代表者名、電話番号、メールアドレス、ホームページ、設立年、年間予算、プロジェクト名など）を抽出してください
+- 明確に述べられている情報のみを抽出してください
+- 推測や補完はしないでください
+
+## 出力形式
+```json
+{{
+  "extracted_insights": [
+    {{"category": "org_name", "content": "団体名"}},
+    {{"category": "representative_name", "content": "代表者名"}},
+    ...
+  ]
+}}
+```
+"""
+        
+        try:
+            response = self.client.models.generate_content(
+                model=self._load_config().get("model_config", {}).get("router_model", "gemini-3-flash-preview"),
+                contents=prompt
+            )
+            
+            response_text = response.text.strip()
+            
+            # JSONを抽出
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0]
+            
+            data = json.loads(response_text)
+            insights = data.get("extracted_insights", [])
+            
+            if not insights:
+                return "⚠️ 入力から団体情報を抽出できませんでした。\n\n以下のような形式でお伝えください：\n- 「団体名は○○」\n- 「代表者は△△」\n- 「電話番号は03-xxxx-xxxx」\n- 「設立年は2020年」"
+            
+            # 抽出した情報をプロファイルに保存
+            updated_items = []
+            category_labels = {
+                "org_name": "団体名",
+                "representative_name": "代表者名",
+                "phone_number": "電話番号",
+                "website_url": "ホームページ",
+                "email_address": "メールアドレス",
+                "founding_year": "設立年",
+                "annual_budget": "年間予算",
+                "project_name": "プロジェクト名",
+                "mission": "ミッション",
+                "vision": "ビジョン",
+                "activities": "活動内容",
+                "target_beneficiaries": "支援対象",
+            }
+            
+            for item in insights:
+                category = item.get("category")
+                content = item.get("content")
+                if category and content:
+                    pm.update_key_insight(category, content)
+                    label = category_labels.get(category, category)
+                    updated_items.append(f"- **{label}**: {content}")
+            
+            pm.save()
+            
+            # 更新結果を返す
+            return f"""✅ プロファイルを更新しました！
+
+## 登録した情報
+{chr(10).join(updated_items)}
+
+---
+*「プロフィール」と入力すると、全ての保存済み情報を確認できます。*
+"""
+            
+        except json.JSONDecodeError as e:
+            logging.error(f"[UPDATE_PROFILE] JSON parse error: {e}")
+            return "⚠️ 情報の解析に失敗しました。もう一度お試しください。"
+        except Exception as e:
+            logging.error(f"[UPDATE_PROFILE] Error: {e}")
+            return f"⚠️ プロファイル更新中にエラーが発生しました: {str(e)}"
+
+
+    def _classify_format_file(self, filename: str, file_path: str = None, grant_name: str = None) -> str:
+        """
+        ファイル名からファイルの用途を判定する。
+        ロジックはFileClassifierに委譲。
+        """
+        return self.file_classifier.classify_format_file(filename, file_path, grant_name)
+    
+
+    
+
+    
+
+
+    def route_message(self, user_message: str, user_id: str, attachments=None, **kwargs) -> str:
         """
         Routes the message based on intent.
         Returns: Response message, possibly with [ATTACHMENT_NEEDED] marker.
+        
+        Args:
+            attachments: Discord attachments (for file uploads like PDFs, images)
         """
         intent = self._classify_intent(user_message)
         print(f"Routing Intent: {intent}")
 
+        if intent == "VERSION":
+            # Show version information
+            return get_version_info()
+        
         if intent == "HELP" or intent == "UNKNOWN":
             # Show help message for both HELP and UNKNOWN intents
             return self._get_help_message()
@@ -167,6 +361,10 @@ class Orchestrator:
 
 *プロファイルを更新するには、会話を続けてください。新しい情報が自動的に反映されます。*
 """
+
+        if intent == "UPDATE_PROFILE":
+            # Update profile directly without interview
+            return self._handle_update_profile(user_message, user_id)
 
 
         if intent == "FIND_RESONANCE":
@@ -204,46 +402,167 @@ class Orchestrator:
 
         if intent == "DRAFT":
             # Create draft and automatically attach file
-            message, content, filename = self.drafter.create_draft(user_id, user_message)
+            # format_files now contains (file_path, file_name, file_type) tuples - already classified by DrafterAgent
+            message, content, filename, format_files, filled_files = self.drafter.create_draft(user_id, user_message)
+            
+            # Build response with format files first, then draft
+            # format_files is already filtered to only include related files (classified by DrafterAgent)
+            response = ""
+            if format_files:
+                response += "📎 **申請フォーマットファイル** が見つかりました:\n\n"
+                response += "📑 **ファイル一覧**:\n"
+                for file_path, file_name, file_type in format_files:
+                    response += f"  • `{file_name}` → {file_type}\n"
+                response += "\n"
+                for file_path, file_name, _ in format_files:
+                    response += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+                response += "\n"
+                
+                # Word/Excel入力試行結果を通知
+                fillable_count = len([f for f in format_files if f[1].lower().endswith(('.xlsx', '.xls', '.docx', '.doc'))])
+                if fillable_count > 0:
+                    if filled_files:
+                        response += f"✅ **自動入力**: {len(filled_files)}件のWord/Excelファイルにドラフト内容を入力しました\n\n"
+                    else:
+                        response += f"ℹ️ **自動入力**: Word/Excelファイル（{fillable_count}件）への入力を試みましたが、入力可能なフィールドが検出できませんでした。マークダウン形式のドラフトをご利用ください。\n\n"
+            else:
+                # Notify user that no format files were found
+                response += "ℹ️ 申請フォーマットファイルは見つかりませんでした。一般的な申請書形式でドラフトを作成しました。\n\n"
+            
+            # Add filled files if any
+            if filled_files:
+                response += "📋 **記入済みフォーマット** を作成しました:\n"
+                for file_path, file_name in filled_files:
+                    response += f"[FILLED_FILE_NEEDED:{user_id}:{file_path}]\n"
+                response += "\n"
             
             if content:
                 # Success: send minimal message with attachment marker
-                # Details will be in the attached file
-                return f"✅ ドラフト作成完了\n📄 ファイルとして送信します...\n[ATTACHMENT_NEEDED:{user_id}:{filename}]"
+                response += f"✅ ドラフト作成完了\n📄 マークダウン形式のドラフトも送信します...\n[ATTACHMENT_NEEDED:{user_id}:{filename}]"
+                return response
             else:
                 # Error occurred
-                return f"❌ ドラフト作成エラー\n{message}"
+                return response + f"❌ ドラフト作成エラー\n{message}"
         
         if intent == "OBSERVE":
-            # Manual Observer trigger
-            return self._run_observer(user_id)
+            # Manual Observer trigger - returns (report, strong_matches)
+            logging.info("[ORCH] OBSERVE intent - calling _run_observer...")
+            report, strong_matches = self._run_observer(user_id)
+            logging.info(f"[ORCH] _run_observer returned, strong_matches count: {len(strong_matches)}")
+            
+            if strong_matches:
+                # Add marker for caller to trigger draft processing AFTER sending report
+                # Use Base64 encoding to safely embed JSON in marker
+                import json
+                import base64
+                matches_data = [{
+                    'title': m['title'],
+                    'official_url': m.get('official_url', 'N/A'),
+                    'amount': m.get('amount', 'N/A'),
+                    'deadline_end': m.get('deadline_end', 'N/A'),
+                    'reason': m.get('reason', '')[:200],  # Truncate long reasons
+                    'resonance_score': m.get('resonance_score', 0)
+                } for m in strong_matches]
+                # Encode as base64 to avoid JSON parsing issues with special characters
+                matches_json = json.dumps(matches_data, ensure_ascii=False)
+                matches_b64 = base64.b64encode(matches_json.encode('utf-8')).decode('ascii')
+                report += f"\n[DRAFT_PENDING:{user_id}:{matches_b64}]"
+            
+            logging.info("[ORCH] OBSERVE intent - returning report")
+            return report
+            
+        # --- PR Agent Intents ---
+        if intent == "PR_REMEMBER_SNS":
+            # Extract basic URL pattern
+            urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', user_message)
+            if not urls:
+                return "⚠️ URLが見つかりませんでした。「FacebookのURLを記憶して: https://...」のように指定してください。"
+            
+            platform = "website"
+            if "facebook" in user_message.lower(): platform = "facebook"
+            elif "instagram" in user_message.lower() or "インスタ" in user_message: platform = "instagram"
+            elif "twitter" in user_message.lower() or "x.com" in user_message: platform = "twitter"
+            
+            return self.pr_agent.remember_sns_info(user_id, platform, urls[0])
+            
+        if intent == "PR_MONTHLY_SUMMARY":
+            return self.pr_agent.generate_monthly_summary(user_id)
+            
+        if intent == "PR_CREATE_POST":
+            # Determine platform
+            platform = "Facebook"
+            if "instagram" in user_message.lower() or "インスタ" in user_message:
+                platform = "Instagram"
+            
+            # Process attachments if provided
+            attachment_data = None
+            if attachments and len(attachments) > 0:
+                attachment_data = attachments  # Pass Discord attachments directly
+            
+            return self.pr_agent.create_post_draft(user_id, platform, user_message, attachments=attachment_data)
+
+        if intent == "PR_SEARCH_RELATED":
+            return self.pr_agent.search_related_info(user_id, user_message)
         
         # Default to Interviewer
-        interviewer_response = self.interviewer.process_message(user_message, user_id, **kwargs)
+        # If attachments exist, use interviewer's file processing
+        if attachments and len(attachments) > 0:
+            # For interview intent with attachments, use the file processing method
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're in async context, but interviewer method is async
+                # This is a sync method, so we need to handle this carefully
+                # For now, just pass text and note that files were attached
+                interviewer_response = self.interviewer.process_message(
+                    user_message + f"\n\n(添付ファイル: {len(attachments)}件を含む)", 
+                    user_id, 
+                    **kwargs
+                )
+            else:
+                interviewer_response = self.interviewer.process_message(user_message, user_id, **kwargs)
+        else:
+            interviewer_response = self.interviewer.process_message(user_message, user_id, **kwargs)
         
         # Check if interview just completed
         if "[INTERVIEW_COMPLETE]" in interviewer_response:
             # Remove the marker from user-facing response
             interviewer_response = interviewer_response.replace("[INTERVIEW_COMPLETE]", "")
             # Auto-trigger Observer
-            observer_results = self._run_observer(user_id)
+            observer_results, _ = self._run_observer(user_id)
             return f"{interviewer_response}\n\n---\n\n【自動分析開始】\n{observer_results}"
         
         return interviewer_response
     
-    def _run_observer(self, user_id: str) -> str:
+    def _run_observer(self, user_id: str, message_callback=None) -> tuple:
         """
         Runs the Observer and formats the output with next scheduled run info.
-        Auto-triggers Drafter for Strong Match opportunities (resonance score >= 70).
-        Filters out previously shown grants.
+        Returns report with slides and list of top matches for separate draft processing.
+        
+        Args:
+            user_id: User/Channel ID
+            message_callback: Optional async callback function to send messages immediately
+                             Signature: async def callback(message: str, attachments: list = None)
+        
+        Returns:
+            tuple: (report_text: str, strong_matches: list)
+                - report_text: Observation report with slides and footer
+                - strong_matches: List of top match opportunities for draft processing
         """
         from datetime import datetime, timedelta
+        import logging
+        
+        logging.info(f"[ORCH] _run_observer started for user: {user_id}")
         
         # Get profile manager for grant history
+        logging.info("[ORCH] Initializing ProfileManager...")
         pm = ProfileManager(user_id=user_id)
+        logging.info("[ORCH] ProfileManager initialized")
         
         # Run Observer (returns text and parsed opportunities)
+        logging.info("[ORCH] Calling observer.observe()...")
         observer_text, opportunities = self.observer.observe(user_id)
+        logging.info(f"[ORCH] observer.observe() returned {len(opportunities)} opportunities")
         
         # Filter out already shown grants
         new_opportunities = []
@@ -260,60 +579,65 @@ class Orchestrator:
         if skipped_count > 0:
             observer_text += f"\n\n⏭️ *{skipped_count}件の助成金は既に提案済みのためスキップしました。*"
         
-        # Filter Strong Matches (resonance score >= 70) from NEW opportunities only
-        strong_matches = [
+        # Filter Top Match (resonance score >= 90, highest score only) from NEW opportunities only
+        top_matches = [
             opp for opp in new_opportunities 
-            if opp.get("resonance_score", 0) >= 70
+            if opp.get("resonance_score", 0) >= 90
         ]
         
-        print(f"[DEBUG] Found {len(opportunities)} total, {len(new_opportunities)} new, {len(strong_matches)} Strong Matches")
+        # Get only the highest scoring grant
+        strong_matches = []
+        if top_matches:
+            top_match = max(top_matches, key=lambda x: x.get("resonance_score", 0))
+            strong_matches = [top_match]
         
-        # Build result message
+        print(f"[DEBUG] Found {len(opportunities)} total, {len(new_opportunities)} new, {len(top_matches)} with score >= 90, auto-processing top {len(strong_matches)}")
+        
+        # Build result message - first send the search results
         result = observer_text
         
-        # Auto-trigger Drafter for Strong Matches
-        if strong_matches:
-            result += "\n\n---\n\n【🎯 Strong Match検出！自動ドラフト生成開始】\n"
-            result += f"\n共鳴度70以上の案件が{len(strong_matches)}件見つかりました。スライドとドラフトを自動生成します...\n"
+        # Generate slides for ALL valid opportunities (not just Top Match)
+        if new_opportunities:
+            result += "\n\n---\n\n【📊 視覚的サマリ】\n"
+            result += f"\n見つかった助成金のスライドを生成しています...\n"
             
-            for i, opp in enumerate(strong_matches, 1):
-                result += f"\n\n**{i}. {opp['title']} (共鳴度: {opp['resonance_score']})**\n"
-                
-                # Generate slide image for grant
+            for i, opp in enumerate(new_opportunities, 1):
+                grant_title = opp['title']
                 try:
-                    logging.info(f"[ORCH] Generating slide for: {opp['title']}")
+                    logging.info(f"[ORCH] Generating slide for: {grant_title}")
                     image_bytes, slide_filename = self.slide_generator.generate_grant_slide(opp)
                     if image_bytes:
                         gcs_path = self.slide_generator.save_to_gcs(image_bytes, user_id, slide_filename)
                         if gcs_path:
-                            result += f"📊 スライド生成完了\n[IMAGE_NEEDED:{user_id}:{slide_filename}]\n"
+                            result += f"\n{i}. **{grant_title}** (共鳴度: {opp['resonance_score']})\n"
+                            result += f"[IMAGE_NEEDED:{user_id}:{slide_filename}]\n"
                 except Exception as e:
-                    logging.error(f"[ORCH] Slide generation failed: {e}")
+                    logging.error(f"[ORCH] Slide generation failed for {grant_title}: {e}")
+        
+        
+        # Note: Draft processing has been moved to _process_top_match_drafts method
+        # _run_observer now only returns report and strong_matches for separate processing
+        
+        # If no strong matches, show list of grants below 90
+        if not strong_matches:
+            result += "\n\n💡 今回は共鳴度90以上の Top Match は見つかりませんでした。"
+            
+            # Show list of grants below 90 with their resonance scores
+            below_90_grants = [o for o in new_opportunities if o.get('resonance_score', 0) < 90]
+            if below_90_grants:
+                result += f"\n\n**📋 検出された助成金一覧** ({len(below_90_grants)}件):\n"
+                # Sort by resonance score descending
+                below_90_grants.sort(key=lambda x: x.get('resonance_score', 0), reverse=True)
+                for i, grant in enumerate(below_90_grants, 1):
+                    score = grant.get('resonance_score', 0)
+                    title = grant.get('title', '不明')
+                    # Truncate long titles
+                    if len(title) > 40:
+                        title = title[:40] + "..."
+                    result += f"\n{i}. **{title}** (共鳴度: {score})"
                 
-                # Format grant information for Drafter
-                grant_info = f"""助成金名: {opp['title']}
-URL: {opp.get('url', 'N/A')}
-金額: {opp.get('amount', 'N/A')}
-共鳴理由: {opp['reason']}
+                result += "\n\n💡 ドラフトを作成したい場合は、助成金名を指定して「[助成金名]のドラフトを作成して」とお伝えください。"
 
-この助成金の申請書ドラフトを作成してください。"""
-                
-                # Auto-trigger Drafter
-                try:
-                    logging.info(f"[ORCH] Auto-triggering Drafter for: {opp['title']}")
-                    message, content, filename = self.drafter.create_draft(user_id, grant_info)
-                    
-                    if content:
-                        # Success: add concise message with attachment marker
-                        result += f"✅ ドラフト作成完了\n[ATTACHMENT_NEEDED:{user_id}:{filename}]\n"
-                    else:
-                        # Error occurred
-                        result += f"⚠️ ドラフト作成エラー: {message}\n"
-                except Exception as e:
-                    logging.error(f"[ORCH] Drafter auto-trigger failed for {opp['title']}: {e}")
-                    result += f"⚠️ ドラフト作成エラー: {str(e)}\n"
-        else:
-            result += "\n\n💡 今回は共鳴度70以上の Strong Match は見つかりませんでした。"
         
         # Add footer with next scheduled run
         next_run = datetime.now() + timedelta(days=7)
@@ -321,7 +645,147 @@ URL: {opp.get('url', 'N/A')}
         
         footer = f"\n\n📅 **次回の自動観察予定**: {next_run_str}\n（手動で観察を実行したい場合は「助成金を探して」と送信してください）"
         
-        return result + footer
+        # Return report and strong_matches for caller to process sequentially
+        return (result + footer, strong_matches)
+
+    def _process_top_match_drafts(self, user_id: str, strong_matches: list, message_callback=None) -> str:
+        """
+        Process draft creation for top match opportunities.
+        Called AFTER report and slides have been sent to Discord.
+        
+        Args:
+            user_id: User/Channel ID
+            strong_matches: List of opportunity dicts with score >= 90
+            message_callback: Optional callback to send messages immediately
+        
+        Returns:
+            Combined results text (or empty if using callback)
+        """
+        result = ""
+        
+        # Initial notification
+        start_msg = f"\n\n---\n\n【🎯 Top Match検出！自動ドラフト生成開始】\n"
+        start_msg += f"\n共鳴度90以上の案件から、最も共鳴度が高い1件を自動処理します。\n"
+        start_msg += "助成金の詳細を調査し、ドラフトを作成します...\n"
+        
+        if message_callback:
+            try:
+                import asyncio
+                if asyncio.iscoroutinefunction(message_callback):
+                    asyncio.create_task(message_callback(start_msg))
+                else:
+                    message_callback(start_msg)
+            except Exception as e:
+                logging.error(f"[ORCH] Message callback failed: {e}")
+                result += start_msg
+        else:
+            result += start_msg
+        
+        # Process each grant
+        for i, opp in enumerate(strong_matches, 1):
+            grant_title = opp['title']
+            grant_url = opp.get('official_url', 'N/A')
+            grant_result = f"\n\n---\n\n## 🔍 助成金 {i}/{len(strong_matches)}: {grant_title}\n"
+            grant_result += f"**(共鳴度: {opp['resonance_score']})**\n\n"
+            
+            # Step 1: Get detailed grant information
+            grant_result += "**Step 1: 助成金詳細を調査中...**\n"
+            grant_details = ""
+            format_files = []
+            try:
+                logging.info(f"[ORCH] Getting details for: {grant_title}")
+                grant_details, format_files = self.drafter._research_grant_format(
+                    grant_title, user_id, grant_url=grant_url
+                )
+                
+                if grant_details:
+                    grant_result += f"📋 詳細取得完了\n"
+                    detail_summary = grant_details[:500] + "..." if len(grant_details) > 500 else grant_details
+                    grant_result += f"\n```\n{detail_summary}\n```\n"
+                else:
+                    grant_result += "ℹ️ 詳細情報は基本情報のみ\n"
+            except Exception as e:
+                logging.error(f"[ORCH] Grant details fetch failed: {e}")
+                grant_result += f"⚠️ 詳細取得スキップ（基本情報で続行）\n"
+            
+            # Add format file markers
+            if format_files:
+                grant_result += "📎 申請フォーマットファイル:\n"
+                for file_path, file_name in format_files:
+                    grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+            
+            # Step 2: Create draft
+            grant_result += "\n**Step 2: ドラフト作成中...**\n"
+            
+            grant_info = f"""助成金名: {opp['title']}
+URL: {grant_url}
+金額: {opp.get('amount', 'N/A')}
+締切: {opp.get('deadline_end', 'N/A')}
+共鳴理由: {opp['reason']}
+
+【詳細情報】
+{grant_details if grant_details else '詳細情報なし'}
+
+この助成金の申請書ドラフトを作成してください。"""
+            
+            try:
+                logging.info(f"[ORCH] Auto-triggering Drafter for: {grant_title}")
+                message, content, filename, draft_format_files, filled_files = self.drafter.create_draft(user_id, grant_info)
+                
+                if draft_format_files and not format_files:
+                    # Filter files: only include files related to the target grant
+                    related_files = []
+                    for file_path, file_name in draft_format_files:
+                        file_type = self._classify_format_file(file_name, file_path, grant_title)
+                        if "別の助成金の可能性" not in file_type:
+                            related_files.append((file_path, file_name, file_type))
+                        else:
+                            logging.info(f"[ORCH] Excluding unrelated file from top match: {file_name}")
+                    
+                    if related_files:
+                        grant_result += "📎 申請フォーマットファイル:\n"
+                        grant_result += "📑 ファイル一覧:\n"
+                        for file_path, file_name, file_type in related_files:
+                            grant_result += f"  • `{file_name}` → {file_type}\n"
+                        grant_result += "\n"
+                        for file_path, file_name, _ in related_files:
+                            grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
+                    else:
+                        grant_result += "ℹ️ 申請フォーマットファイルは見つかりませんでした（関連性が確認できないファイルは除外）。\n"
+                elif not format_files and not draft_format_files:
+                    grant_result += "ℹ️ 申請フォーマットファイルは見つかりませんでした。\n"
+                
+                # Add filled files if any
+                if filled_files:
+                    grant_result += "📋 記入済みフォーマット:\n"
+                    for file_path, file_name in filled_files:
+                        grant_result += f"[FILLED_FILE_NEEDED:{user_id}:{file_path}]\n"
+                
+                if content:
+                    grant_result += f"✅ ドラフト作成完了\n[ATTACHMENT_NEEDED:{user_id}:{filename}]\n"
+                else:
+                    grant_result += f"⚠️ ドラフト作成エラー: {message}\n"
+            except Exception as e:
+                logging.error(f"[ORCH] Drafter auto-trigger failed for {grant_title}: {e}")
+                grant_result += f"⚠️ ドラフト作成エラー: {str(e)}\n"
+            
+            grant_result += f"\n✨ **{grant_title}** の処理完了\n"
+            
+            # Send or accumulate result
+            if message_callback:
+                try:
+                    import asyncio
+                    if asyncio.iscoroutinefunction(message_callback):
+                        asyncio.create_task(message_callback(grant_result))
+                    else:
+                        message_callback(grant_result)
+                except Exception as e:
+                    logging.error(f"[ORCH] Message callback failed: {e}")
+                    result += grant_result
+            else:
+                result += grant_result
+        
+        return result
 
     def _handle_view_drafts(self, user_message: str, user_id: str) -> str:
         """
@@ -413,5 +877,36 @@ URL: {opp.get('url', 'N/A')}
                      
             except Exception as e:
                 print(f"Error checking profile {file_path}: {e}")
+                
+        return notifications
+
+    def run_monthly_tasks(self) -> List[Tuple[str, str]]:
+        """
+        Triggered by scheduler on the 1st of every month.
+        Generates monthly summary for all known profiles.
+        Returns a list of (user_id, summary_text).
+        """
+        notifications = []
+        profile_files = glob.glob(os.path.join("profiles", "*_profile.json"))
+        
+        for file_path in profile_files:
+            try:
+                filename = os.path.basename(file_path)
+                user_id = filename.replace("_profile.json", "")
+                
+                print(f"Running monthly summary for User: {user_id}")
+                
+                # Generate Monthly Summary
+                summary = self.pr_agent.generate_monthly_summary(user_id)
+                
+                # Save to history (ProfileManager extension required, but for now assuming it's part of pr_agent or pm)
+                # Ideally PR Agent handles saving, but let's ensure here.
+                pm = ProfileManager(user_id=user_id)
+                pm.add_monthly_summary(summary)
+                
+                notifications.append((user_id, f"📅 **【自動実行】月次活動サマリを作成しました**\n\n{summary}"))
+                     
+            except Exception as e:
+                print(f"Error running monthly task for {file_path}: {e}")
                 
         return notifications

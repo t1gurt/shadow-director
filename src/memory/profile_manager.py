@@ -150,12 +150,37 @@ class ProfileManager:
         insights = self._profile.get("insights", {})
         
         # Category labels in Japanese
+        # Category labels in Japanese
         category_labels = {
+            # Core Identity & Origin
             "primary_experience": "🌱 原体験",
             "origin_story": "📖 創設ストーリー",
             "mission": "🎯 ミッション",
             "vision": "🌟 ビジョン",
             "values": "💎 価値観",
+            
+            # Organization Details - Individual Fields
+            "org_name": "🏢 団体名",
+            "representative_name": "👤 代表者名",
+            "phone_number": "📞 連絡先電話番号",
+            "website_url": "🌐 ホームページ",
+            "email_address": "📧 メールアドレス",
+            "founding_year": "📅 設立年",
+            "annual_budget": "💰 年間予算",
+            
+            # Legacy organization info (for backward compatibility)
+            "organization_info": "🏢 団体基本情報",
+            "contact_info": "📞 連絡先情報",
+            "staff_info": "👥 スタッフ構成",
+            "finance_info": "💰 財務状況",
+            
+            # Project Concept
+            "project_name": "🚀 プロジェクト名",
+            "project_plan": "📝 プロジェクト計画",
+            "activity_plan": "📅 活動スケジュール",
+            "budget_plan": "💸 予算計画",
+            
+            # Existing specific fields
             "activities": "📋 活動内容",
             "target_beneficiaries": "👥 支援対象",
             "achievements": "🏆 成果・実績",
@@ -167,9 +192,10 @@ class ProfileManager:
         
         # Section groupings
         sections = {
+            "団体詳細情報": ["org_name", "representative_name", "phone_number", "website_url", "email_address", "founding_year", "annual_budget", "organization_info", "contact_info", "staff_info", "finance_info"],
             "コア・アイデンティティ": ["primary_experience", "origin_story", "mission", "vision", "values"],
-            "活動情報": ["activities", "target_beneficiaries", "achievements"],
-            "組織力": ["strengths", "partnerships", "challenges"],
+            "活動・組織力": ["activities", "target_beneficiaries", "achievements", "strengths", "partnerships", "challenges"],
+            "プロジェクト構想": ["project_name", "project_plan", "activity_plan", "budget_plan"],
             "マッチング": ["keywords"]
         }
         
@@ -224,6 +250,46 @@ class ProfileManager:
     def clear_history(self) -> None:
         """Clears the conversation history (for testing or reset)."""
         self._profile["conversation_history"] = []
+        self.save_profile()
+
+    # ==================== PR/SNS情報管理 ====================
+
+    def update_sns_info(self, platform: str, url: str) -> None:
+        """
+        Updates SNS monitoring information for the profile.
+        
+        Args:
+            platform: sns platform (e.g., 'facebook', 'instagram', 'twitter', 'website')
+            url: The URL to watch
+        """
+        if "sns_watch_info" not in self._profile:
+            self._profile["sns_watch_info"] = {}
+        
+        # Normalize key
+        platform_key = platform.lower().strip()
+        self._profile["sns_watch_info"][platform_key] = url
+        self.save_profile()
+        logging.info(f"[PROFILE] Updated SNS info for {platform_key}: {url}")
+
+    def get_sns_info(self) -> Dict[str, str]:
+        """
+        Returns all stored SNS watch information.
+        """
+        return self._profile.get("sns_watch_info", {})
+
+    def add_monthly_summary(self, summary_text: str) -> None:
+        """
+        Saves a generated monthly summary to the profile history.
+        """
+        from datetime import datetime
+        if "monthly_summaries" not in self._profile:
+            self._profile["monthly_summaries"] = []
+            
+        record = {
+            "date": datetime.now().isoformat(),
+            "summary": summary_text
+        }
+        self._profile["monthly_summaries"].append(record)
         self.save_profile()
 
     # ==================== 助成金履歴管理 ====================

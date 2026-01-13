@@ -1,58 +1,54 @@
 """
 Vertex AI Memory Bank Storage Backend
 Uses Vertex AI Agent Engine Memory Bank for persistent memory storage.
+
+Updated to use client-based API per migration guide:
+https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations/agent-engine-migration
 """
 
 import os
 import json
 import logging
 from typing import Dict, Any, List, Optional
-from abc import ABC, abstractmethod
 
 try:
-    from google.cloud import aiplatform
-    from google.cloud.aiplatform_v1beta1 import (
-        ReasoningEngineServiceClient,
-        ReasoningEngineExecutionServiceClient,
-    )
-    from google.cloud.aiplatform_v1beta1.types import (
-        reasoning_engine as reasoning_engine_types,
-    )
+    import vertexai
     MEMORY_BANK_AVAILABLE = True
 except ImportError:
     MEMORY_BANK_AVAILABLE = False
-    logging.warning("[MEMORY_BANK] google-cloud-aiplatform not available for Memory Bank")
+    logging.warning("[MEMORY_BANK] vertexai not available for Memory Bank")
 
 
 class MemoryBankStorage:
     """
     Stores memories using Vertex AI Agent Engine Memory Bank.
     Data is organized by channel_id (scope) for team collaboration.
+    
+    Uses the new client-based API (vertexai.Client).
     """
     
-    def __init__(self, project_id: str = None, location: str = "us-central1"):
+    def __init__(self, project_id: str = None, location: str = "us-central1", agent_engine_id: str = None):
         """
         Initialize Memory Bank storage.
         
         Args:
             project_id: Google Cloud project ID
-            location: Vertex AI location (default: us-central1)
+            location: Vertex AI location (default: us-central1, must be a supported region)
+            agent_engine_id: Optional explicit Agent Engine ID
         """
         if not MEMORY_BANK_AVAILABLE:
-            raise ImportError("google-cloud-aiplatform is required for MemoryBankStorage")
+            raise ImportError("vertexai is required for MemoryBankStorage")
         
         self.project_id = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
         self.location = location
+        self.agent_engine_id_override = agent_engine_id or os.environ.get("GOOGLE_CLOUD_AGENT_ENGINE_ID")
         
-        # Initialize Vertex AI
-        aiplatform.init(project=self.project_id, location=self.location)
-        
-        # Client for managing Agent Engine instances
-        self.client = ReasoningEngineServiceClient()
-        self.execution_client = ReasoningEngineExecutionServiceClient()
-        
-        # Parent path for API calls
-        self.parent = f"projects/{self.project_id}/locations/{self.location}"
+        # Initialize new Vertex AI Client (client-based API)
+        # https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations/agent-engine-migration
+        self.client = vertexai.Client(
+            project=self.project_id,
+            location=self.location
+        )
         
         # Get or create Agent Engine instance
         self.agent_engine_name = self._get_or_create_agent_engine()
@@ -66,18 +62,35 @@ class MemoryBankStorage:
         Returns:
             Agent Engine resource name
         """
-        # List existing Agent Engines to find one for Shadow Director
+        # 1. Use explicit ID if provided
+        if self.agent_engine_id_override:
+            # Format: projects/{project}/locations/{location}/reasoningEngines/{id}
+            if "/" in self.agent_engine_id_override:
+                # Already a full resource name
+                name = self.agent_engine_id_override
+            else:
+                # ID only - construct full name
+                name = f"projects/{self.project_id}/locations/{self.location}/reasoningEngines/{self.agent_engine_id_override}"
+            
+            logging.info(f"[MEMORY_BANK] Using configured Agent Engine ID: {name}")
+            return name
+
+        # 2. List existing Agent Engines to find one for Shadow Director
         try:
-            request = reasoning_engine_types.ListReasoningEnginesRequest(
-                parent=self.parent
-            )
-            engines = list(self.client.list_reasoning_engines(request=request))
+            # Use new API: client.agent_engines.list()
+            engines = list(self.client.agent_engines.list())
             
             # Look for existing Shadow Director engine
             for engine in engines:
-                if "shadow-director" in engine.display_name.lower():
-                    logging.info(f"[MEMORY_BANK] Found existing Agent Engine: {engine.name}")
-                    return engine.name
+                # Access display_name from the engine object
+                display_name = getattr(engine, 'display_name', '') or ''
+                if not display_name and hasattr(engine, 'api_resource'):
+                    display_name = getattr(engine.api_resource, 'display_name', '') or ''
+                
+                if "shadow-director" in display_name.lower():
+                    engine_name = getattr(engine, 'name', '') or getattr(engine.api_resource, 'name', '')
+                    logging.info(f"[MEMORY_BANK] Found existing Agent Engine: {engine_name}")
+                    return engine_name
             
             # Create new Agent Engine for Memory Bank
             return self._create_agent_engine()
@@ -89,30 +102,32 @@ class MemoryBankStorage:
     def _create_agent_engine(self) -> str:
         """
         Create a new Agent Engine instance with Memory Bank configuration.
+        Uses the new client-based API.
         
         Returns:
             Agent Engine resource name
         """
         try:
-            # Create Agent Engine with Memory Bank config
-            reasoning_engine = reasoning_engine_types.ReasoningEngine(
-                display_name="shadow-director-memory-bank",
-                spec=reasoning_engine_types.ReasoningEngineSpec(
-                    # Memory Bank configuration
-                    class_methods=[]
-                )
+            # Create Agent Engine using new client-based API
+            # https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations/agent-engine-migration
+            # Format: client.agent_engines.create(agent=None, config={...})
+            agent_engine = self.client.agent_engines.create(
+                agent=None,  # No agent for memory-only engine
+                config={
+                    "display_name": "shadow-director-memory-bank",
+                    "description": "Memory Bank for Shadow Director NPO assistant",
+                    "context_spec": {
+                        "memory_bank_config": {
+                            # Default memory bank configuration - automatic memory generation
+                        }
+                    }
+                }
             )
             
-            request = reasoning_engine_types.CreateReasoningEngineRequest(
-                parent=self.parent,
-                reasoning_engine=reasoning_engine
-            )
-            
-            operation = self.client.create_reasoning_engine(request=request)
-            result = operation.result()
-            
-            logging.info(f"[MEMORY_BANK] Created new Agent Engine: {result.name}")
-            return result.name
+            # Get the resource name
+            name = getattr(agent_engine, 'name', '') or getattr(agent_engine.api_resource, 'name', '')
+            logging.info(f"[MEMORY_BANK] Created new Agent Engine: {name}")
+            return name
             
         except Exception as e:
             logging.error(f"[MEMORY_BANK] Error creating Agent Engine: {e}")
@@ -193,7 +208,7 @@ class MemoryBankStorage:
     
     def create_memory(self, channel_id: str, fact: str) -> Optional[str]:
         """
-        Create a single memory in Memory Bank.
+        Create a single memory in Memory Bank using generate API.
         
         Args:
             channel_id: Discord channel ID (scope)
@@ -203,22 +218,19 @@ class MemoryBankStorage:
             Memory resource name, or None if failed
         """
         try:
-            # Use the Agent Engine to create memory
-            request = {
-                "scope": {
-                    "channel_id": channel_id
-                },
-                "fact": fact
-            }
-            
-            # Execute memory creation
-            response = self.execution_client.query_reasoning_engine(
+            # Use new API: client.agent_engines.memories.generate()
+            # scope is a dictionary for scoping memories
+            result = self.client.agent_engines.memories.generate(
                 name=self.agent_engine_name,
-                input={"action": "create_memory", "data": request}
+                scope={"channel_id": channel_id},
+                messages=[{
+                    "role": "user",
+                    "content": fact
+                }]
             )
             
             logging.info(f"[MEMORY_BANK] Created memory for channel {channel_id}")
-            return response.output if hasattr(response, 'output') else None
+            return str(result) if result else None
             
         except Exception as e:
             logging.error(f"[MEMORY_BANK] Error creating memory: {e}")
@@ -242,24 +254,37 @@ class MemoryBankStorage:
             List of memory dictionaries
         """
         try:
-            request = {
-                "scope": {
-                    "channel_id": channel_id
-                },
-                "limit": limit
-            }
-            
+            # Use new API with scope parameter
             if query:
-                request["query"] = query
+                # Similarity search with query
+                result = self.client.agent_engines.memories.retrieve(
+                    name=self.agent_engine_name,
+                    scope={"channel_id": channel_id},
+                    similarity_search_params={
+                        "query": query,
+                        "max_memories_to_return": min(limit, 100)
+                    }
+                )
+            else:
+                # Simple retrieval without query
+                result = self.client.agent_engines.memories.retrieve(
+                    name=self.agent_engine_name,
+                    scope={"channel_id": channel_id},
+                    simple_retrieval_params={
+                        "max_memories_to_return": min(limit, 100)
+                    }
+                )
             
-            response = self.execution_client.query_reasoning_engine(
-                name=self.agent_engine_name,
-                input={"action": "retrieve_memories", "data": request}
-            )
+            # Parse result into list of memory dicts
+            memories = []
+            if result and hasattr(result, 'memories'):
+                for memory in result.memories:
+                    memories.append({
+                        "fact": getattr(memory, 'fact', ''),
+                        "memory_id": getattr(memory, 'name', '')
+                    })
             
-            if hasattr(response, 'output'):
-                return json.loads(response.output) if isinstance(response.output, str) else response.output
-            return []
+            return memories
             
         except Exception as e:
             logging.error(f"[MEMORY_BANK] Error retrieving memories: {e}")
@@ -277,29 +302,31 @@ class MemoryBankStorage:
             List of generated memory facts
         """
         try:
-            # Format conversation for memory generation
-            conversation_text = "\n".join([
-                f"{entry['role']}: {entry['content']}"
+            # Use new API: client.agent_engines.memories.generate()
+            # Format conversation as messages for memory generation
+            messages = [
+                {
+                    "role": entry.get('role', 'user'),
+                    "content": entry.get('content', '')
+                }
                 for entry in conversation
-            ])
+            ]
             
-            request = {
-                "scope": {
-                    "channel_id": channel_id
-                },
-                "conversation": conversation_text
-            }
-            
-            response = self.execution_client.query_reasoning_engine(
+            result = self.client.agent_engines.memories.generate(
                 name=self.agent_engine_name,
-                input={"action": "generate_memories", "data": request}
+                scope={"channel_id": channel_id},
+                messages=messages
             )
             
-            if hasattr(response, 'output'):
-                memories = json.loads(response.output) if isinstance(response.output, str) else response.output
-                logging.info(f"[MEMORY_BANK] Generated {len(memories)} memories for channel {channel_id}")
-                return memories
-            return []
+            # Extract generated memories
+            memories = []
+            if result and hasattr(result, 'memories'):
+                for memory in result.memories:
+                    if hasattr(memory, 'fact'):
+                        memories.append(memory.fact)
+            
+            logging.info(f"[MEMORY_BANK] Generated {len(memories)} memories for channel {channel_id}")
+            return memories
             
         except Exception as e:
             logging.error(f"[MEMORY_BANK] Error generating memories: {e}")
