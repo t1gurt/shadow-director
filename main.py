@@ -86,7 +86,8 @@ async def scheduled_monthly_summary():
 
     logging.info("It's the 1st of the month! Running monthly summary task...")
     try:
-        notifications = orchestrator.run_monthly_tasks()
+        # Run potentially long-running task in a separate thread to avoid blocking main loop
+        notifications = await asyncio.to_thread(orchestrator.run_monthly_tasks)
         
         for user_id, message in notifications:
             try:

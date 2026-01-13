@@ -1352,22 +1352,22 @@ JSONのみを出力してください。
                 if field.input_length_type == "short":
                     length_instruction = "\n\n**回答形式**: 1行以内の簡潔な回答（名前、日付、数値など）"
                     if field.max_length:
-                        length_instruction += f"（{field.max_length}字以内）"
+                        length_instruction += f"\n**重要**: {field.max_length}文字以内で**完全に完結する**文章やフレーズにしてください。\n- **禁止事項**: 文末を「...」や「…」で省略することは**厳禁**です。\n- 文末が切れないように体言止めなどを活用し、必ず制限内に収めてください。"
                 elif field.input_length_type == "long":
                     if field.max_length:
                         # 長文で文字数制限あり：制限値の90%を目標に
                         target_length = int(field.max_length * 0.9)
                         length_instruction = f"""
-
 **文字数制限**: {field.max_length}字以内
 **目標文字数**: {target_length}字程度（制限の90%を目安に）
-**重要**: 文字数制限を厳守してください。{field.max_length}字を超えないよう、適切に要約してください。"""
+**重要**: 文字数制限を厳守してください。{field.max_length}字を超えないよう、適切に要約してください。
+**禁止事項**: 文末を「...」で省略してはいけません。文章を短く書き直して収めてください。"""
                     else:
                         length_instruction = "\n\n**回答形式**: 詳細な長文回答（100〜500字程度）"
                 else:
                     # unknownの場合
                     if field.max_length:
-                        length_instruction = f"\n\n**文字数制限**: {field.max_length}字以内で回答してください。"
+                        length_instruction = f"\n\n**文字数制限**: {field.max_length}字以内で回答してください。文章が途中で切れないようにしてください。"
                 
                 prompt = f"""あなたはNPOの助成金申請書作成を支援する専門家です。
 以下のNPOプロファイル情報と助成金情報に基づいて、申請書の指定された項目に対する回答を作成してください。
@@ -1390,7 +1390,7 @@ JSONのみを出力してください。
 2. 助成金の目的や評価基準を意識した回答を心がけてください
 3. 具体的で説得力のある内容にしてください
 4. 回答本文のみを出力してください（項目名や説明は不要）
-5. 文字数制限がある場合は必ず守ってください
+5. 文字数制限がある場合は必ず守ってください。**制限超過による途中切れや「...」での省略は厳禁**です。
 
 # 懸念点の報告（重要）
 - プロファイルに情報がなく回答できない場合: 回答の末尾に `[MISSING_INFO: 理由]` を付記
@@ -1427,11 +1427,13 @@ JSONのみを出力してください。
                     value = re.sub(r'\s*\[UNCERTAIN:[^\]]+\]', '', value).strip()
                     self.logger.info(f"[FORMAT_MAPPER] Field {field.field_name} is uncertain: {concern_reason}")
                 
-                # 文字数制限がある場合はトリム（余裕を持たせる）
+                # 文字数制限チェック & 省略記号検知
                 if field.max_length and len(value) > field.max_length:
-                    # 文字数オーバーの場合、末尾をトリムして適切に終わらせる
-                    value = value[:field.max_length - 3] + "..."
-                    self.logger.info(f"[FORMAT_MAPPER] Trimmed field {field.field_id} to {field.max_length} chars")
+                    self.logger.warning(f"[FORMAT_MAPPER] Field {field.field_id} exceeded max length ({len(value)} > {field.max_length}). Value: {value[:20]}...")
+                
+                if value.endswith("...") or value.endswith("…"):
+                     self.logger.warning(f"[FORMAT_MAPPER] Field {field.field_id} ends with ellipsis. VLM failed to summarize properly.")
+                     # ここではあえて削除せず、ユーザーに修正を促す（または自動再生成ロジックを入れる余地あり）
                 
                 # 結果を格納（懸念点情報を含む）
                 result[field.field_id] = {

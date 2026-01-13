@@ -95,11 +95,18 @@ graph TD
     
     subgraph "Interface Layer"
         Discord[Discord Bot]
+        ProgressNotifier[Progress Notifier]
+        Discord <-.->|Real-time Updates| ProgressNotifier
     end
 
     subgraph "Brain Layer (Cloud Run)"
         Discord -->|Message Event| Orchestrator[Orchestrator Agent]
         
+        %% File Processing Pipeline
+        Orchestrator -->|Step 1: Classify| FileClassifier[File Classifier]
+        FileClassifier -->|Profile/Draft/Format| FileProcessor[File Processor]
+        
+        %% Agent Routing
         Orchestrator -->|Route: INTERVIEW| Interviewer[Interviewer Agent]
         Orchestrator -->|Route: OBSERVE| Observer[Observer Agent]
         Orchestrator -->|Route: DRAFT| Drafter[Drafter Agent]
@@ -110,6 +117,7 @@ graph TD
             GeminiClient -->|vertexai=True| VertexAI[Vertex AI API]
             VertexAI --> GeminiPro[Gemini 3.0 Pro]
             VertexAI --> GeminiFlash[Gemini 3.0 Flash]
+            VertexAI --> Imagen3[Imagen 3]
         end
         
         Interviewer --> GeminiClient
@@ -121,26 +129,49 @@ graph TD
     end
 
     subgraph "SGNA Model (Search-Ground-Navigate-Act)"
-        Observer -->|Search| GrantFinder[Grant Finder]
-        GrantFinder -->|Navigate| Playwright[Playwright Browser]
-        Playwright -->|Act| PageScraper[Grant Page Scraper]
-        PageScraper -->|Validate| FileValidator[File Validator]
-        PageScraper -.->|Fallback| VisualAnalyzer[Visual Analyzer]
+        Observer -->|1. Search| GrantFinder[Grant Finder]
+        GrantFinder -->|2. Navigate| Playwright[Playwright Browser]
+        Playwright -->|3. Act| PageScraper[Grant Page Scraper]
+        PageScraper -->|Download| FileDownloader[File Downloader]
+        FileDownloader -->|4. Validate| FileValidator[File Validator]
+        FileValidator -->|Year/Round Check| GeminiFlash
     end
 
-    subgraph "Storage Layer"
-        Interviewer <-->|Save/Load Profile| GCS[(Google Cloud Storage)]
-        Observer <-->|Read Profile| GCS
-        Drafter <-->|Read Profile| GCS
+    subgraph "Document Processing Pipeline"
+        Drafter -->|Detect Format| VisualAnalyzer[Visual Analyzer VLM]
+        VisualAnalyzer -->|Field Mapping| FormatFieldMapper[Format Field Mapper]
+        FormatFieldMapper -->|Auto-fill| DocumentFiller[Document Filler]
+        DocumentFiller -->|Word/Excel| OfficeUtils[Office Utils]
+    end
+
+    subgraph "Reporting & Visualization"
+        Observer -->|Monthly Summary| SlideGenerator[Slide Generator]
+        SlideGenerator -->|Imagen 3 / Matplotlib| ReportSlides[Report Slides]
+        PRAgent -->|SNS Content| GeminiPro
+    end
+
+    subgraph "Storage Layer (GCS)"
+        ProfileMgr[Profile Manager]
+        GCS[(Google Cloud Storage)]
+        
+        Interviewer <-->|Save/Load| ProfileMgr
+        Observer <-->|Read Profile| ProfileMgr
+        Drafter <-->|Read Profile| ProfileMgr
+        PRAgent <-->|Read Profile| ProfileMgr
+        
+        ProfileMgr <-->|profiles/{user_id}| GCS
+        Drafter <-->|drafts/{user_id}| GCS
+        Observer <-->|reports/{user_id}| GCS
     end
 
     subgraph "Action Layer"
         Drafter -->|Create Doc| GDocs[Google Docs API]
-        Orchestrator -->|Send Response| Discord
+        Orchestrator -->|Send Files & Messages| Discord
     end
     
     subgraph "Scheduling"
-        Tasks[Discord Tasks Loop] -->|Weekly Trigger| Observer
+        WeeklyTask[Weekly Observer<br/>168 hours] -->|Auto Trigger| Observer
+        MonthlyTask[Monthly Report<br/>1st of month, 9:00 AM] -->|Auto Trigger| Observer
     end
 ```
 
@@ -149,8 +180,10 @@ graph TD
 ### LLM & AI
 - **Gemini 3.0 Pro (Preview)**: 推論・執筆・戦略立案（インタビュアー、ドラフター）
 - **Gemini 3.0 Flash (Preview)**: チャット・検索・一次選別（オブザーバー）
+  - **Vision Language Model (VLM)**: Word/Excel申請書フォーマットの視覚的解析
 - **Google Search Grounding**: リアルタイム情報検索
 - **Playwright**: ヘッドレスブラウザによるDOM解析・サイト探索
+  - Chromium自動インストール（`playwright install chromium`）
 
 ### Platform & Infrastructure
 - **Google Cloud Run**: フルマネージドコンテナ実行環境
@@ -161,104 +194,74 @@ graph TD
   - Bucket: `gs://zenn-shadow-director-data`
   - プロファイル: `profiles/{user_id}/soul_profile.json`
   - ドラフト: `drafts/{user_id}/*.md`
+  - 月次レポート: `reports/{user_id}/monthly_*.md`
 - **Google Docs API**: ドラフトをGoogle Docとして直接作成（有効時）
 - **Vertex AI**: Gemini API アクセス（`google-genai` SDK with Vertex AI backend）
 
 ### Development
 - **Language**: Python 3.10
-- **Framework**: `discord.py` (Discord Bot), `google-genai` (Gemini SDK)
+- **Framework**: 
+  - `discord.py` (Discord Bot)
+  - `google-genai` (Gemini SDK)
+  - `playwright` (Browser automation)
+  - `python-docx` (Word文書処理)
+  - `openpyxl` (Excel文書処理)
+  - `pillow` (画像処理)
+  - `pyyaml` (設定ファイル管理)
 - **Containerization**: Docker + Cloud Build
 
 ## 📂 ディレクトリ構成 (Directory Structure)
 
 ```text
 shadow-director/
-├── README.md                     # このファイル
-├── Dockerfile                    # Cloud Run デプロイ用
-├── deploy_cloudrun.sh            # デプロイスクリプト
-├── pyproject.toml                # 依存関係
-├── main.py                       # Discord Bot エントリーポイント
+├── README.md                        # このファイル
+├── Dockerfile                       # Cloud Run デプロイ用
+├── deploy_cloudrun.sh               # デプロイスクリプト
+├── pyproject.toml                   # 依存関係管理
+├── main.py                          # Discord Bot エントリーポイント
 ├── .agent/
 │   └── workflows/
-│       └── deploy_on_wsl.md      # WSLデプロイワークフロー
+│       ├── deploy_on_wsl.md         # WSLデプロイワークフロー
+│       ├── setup-google-docs.md     # Google Docs API セットアップ
+│       └── version-update.md        # バージョン更新ワークフロー
 ├── src/
 │   ├── agents/
-│   │   ├── orchestrator.py       # ルーティングロジック
-│   │   ├── interviewer.py        # インタビューエージェント (Gemini 3.0 Pro)
-│   │   ├── observer.py           # 監視エージェント (Gemini 3.0 Flash + Search)
-│   │   └── drafter.py            # ドラフト生成エージェント (Gemini 3.0 Pro)
+│   │   ├── orchestrator.py          # メインルーティング・調整エージェント
+│   │   ├── interviewer.py           # インタビューエージェント (Gemini 3.0 Pro)
+│   │   ├── observer.py              # 監視エージェント (Gemini 3.0 Flash)
+│   │   ├── drafter.py               # ドラフト生成エージェント (Gemini 3.0 Pro)
+│   │   └── pr_agent.py              # 広報エージェント (SNS投稿生成)
 │   ├── tools/
-│   │   ├── file_processor.py     # PDF/URL処理ユーティリティ
-│   │   ├── search_tool.py        # Google Search Grounding設定
-│   │   ├── gdocs_tool.py         # Google Docs API Tool
-│   │   └── site_explorer.py      # Playwright基盤クラス
+│   │   ├── file_processor.py        # PDF/URL処理ユーティリティ
+│   │   ├── search_tool.py           # Google Search Grounding設定
+│   │   ├── gdocs_tool.py            # Google Docs API ツール
+│   │   ├── site_explorer.py         # Playwright基盤クラス
+│   │   ├── slide_generator.py       # スライド画像生成（Imagen 3/matplotlib）
+│   │   ├── document_filler.py       # Word/Excel自動入力エンジン
+│   │   └── file_downloader.py       # HTTPファイルダウンローダー
 │   ├── logic/
-│   │   ├── grant_finder.py       # 助成金検索ロジック（SGNAモデル実装）
-│   │   ├── grant_validator.py    # URL検証・品質評価
-│   │   ├── grant_page_scraper.py # Playwright助成金ページスクレイパー
-│   │   └── file_validator.py     # PDF/ZIPファイル検証（SGNAモデル）
-│   └── memory/
-│       └── profile_manager.py    # GCS操作 (プロファイル管理)
-└── config/
-    └── prompts.yaml              # 各エージェントのシステムプロンプト
+│   │   ├── grant_finder.py          # 助成金検索ロジック（SGNAモデル）
+│   │   ├── grant_validator.py       # URL検証・品質評価
+│   │   ├── grant_page_scraper.py    # Playwright助成金ページスクレイパー
+│   │   ├── file_validator.py        # PDF/ZIPファイル検証（SGNAモデル）
+│   │   ├── file_classifier.py       # アップロードファイル分類ロジック
+│   │   ├── visual_analyzer.py       # VLM入力パターン検出（Word/Excel）
+│   │   └── format_field_mapper.py   # フォーマット項目マッピング
+│   ├── memory/
+│   │   ├── profile_manager.py       # プロファイル管理 (GCS/Local)
+│   │   └── memory_bank_storage.py   # Vertex AI Memory Bank 統合
+│   ├── utils/
+│   │   ├── gemini_client.py         # Gemini クライアント管理
+│   │   ├── progress_notifier.py     # 進捗通知システム
+│   │   └── office_utils.py          # Office文書ユーティリティ
+│   └── version.py                   # バージョン情報管理
+├── config/
+│   └── prompts.yaml                 # エージェントプロンプト定義
+├── docs/                            # 設計資料・仕様書（日本語）
+├── scripts/
+│   └── format_validator.py          # フォーマット検証スクリプト
+└── tests/                           # テストコード
 ```
-
-## 🗓️ 開発ロードマップ (Roadmap)
-
-### Phase 1: The Soul Sync (Foundation) - ✅ Complete
-- [x] Project Setup & Environment Configuration
-- [x] Interviewer Agent
-  - [x] Gemini 3.0 Pro インタビューロジック
-  - [x] **PDF/URLドキュメント処理** (Vertex AI Part API)
-  - [x] **選択的ターンカウント** (理解度マーカー検出)
-  - [x] 会話履歴管理 & ターンカウント
-  - [x] Insight抽出と構造化データ保存
-- [x] Profile Manager
-  - [x] ローカル環境(JSON)とGCS環境の抽象化
-  - [x] GCS統合 (`gs://zenn-shadow-director-data`)
-
-### Phase 2: The Observer (Autonomy) - ✅ Complete
-- [x] Observer Agent
-  - [x] Google Search Grounding統合
-  - [x] Resonance Score判定ロジック
-  - [x] 自律的検索クエリ生成
-- [x] Scheduling
-  - [x] Discord Tasks Loop (週次実行)
-  - [x] マニュアルトリガー (`/observe` コマンド相当)
-
-### Phase 3: The Action & Interface - ✅ Complete
-- [x] Drafter Agent
-  - [x] 申請書ドラフト生成ロジック
-  - [x] Google Docs API統合
-- [x] Discord Integration
-  - [x] Discord Bot UI (メンション対応)
-  - [x] **進捗メッセージ表示** (ファイル/URL分析中)
-  - [x] **メッセージ重複処理防止**
-  - [x] 長文応答の自動分割 (2000文字制限対応)
-- [x] Intelligent Routing
-  - [x] Router Prompt (INTERVIEW / OBSERVE / DRAFT 判定)
-  - [x] インタビュー完了時の自動Observer起動
-
-### Phase 6-9: Production Deployment - ✅ Complete
-- [x] Containerization (Dockerfile)
-- [x] Cloud Run Deployment
-  - [x] **シングルインスタンス設定** (Discord Bot用)
-  - [x] **ヘルスチェックサーバー**
-  - [x] **環境変数管理**
-- [x] Gemini 3.0 Migration
-  - [x] `google-genai` SDK with Vertex AI
-  - [x] `api_version="v1beta1"` 設定
-  - [x] Gemini 3.0 Pro/Flash モデル利用
-
-## 🚧 未実装機能 (Not Implemented Yet)
-
-以下の機能は将来の拡張として検討中です：
-
-- [x] **Vertex AI Memory Bank**: `USE_MEMORY_BANK=true` 環境変数で有効化可能（Preview）
-- [ ] **Context Caching**: 長文プロファイルの効率的な再利用
-- [ ] **Multi-Tenant Support**: 複数のNPO団体を同時サポート（現在はチャネルベースの分離のみ）
-- [ ] **Advanced Analytics**: プロファイルデータの可視化・分析ダッシュボード
-- [ ] **Webhook Integration**: 外部サービス（Slack, Teams等）との連携
 
 ## 🚀 Getting Started
 

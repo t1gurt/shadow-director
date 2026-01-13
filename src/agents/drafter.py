@@ -568,9 +568,8 @@ class DrafterAgent:
         This is used when we have a verified URL from Observer.
         """
         try:
-            import nest_asyncio
-            nest_asyncio.apply()
-            return asyncio.run(self._async_scrape_url_for_files(url, user_id))
+            from src.tools.site_explorer import run_sync
+            return run_sync(self._async_scrape_url_for_files(url, user_id))
         except Exception as e:
             logging.error(f"[DRAFTER] _scrape_url_for_files error: {e}")
             return []
@@ -612,11 +611,10 @@ class DrafterAgent:
     def _run_playwright_deep_search(self, grant_name: str, user_id: str) -> List[Tuple[str, str]]:
         """
         Run Playwright-based deep search for format files.
-        Uses nest_asyncio to allow running async code within Discord.py's event loop.
+        Uses run_sync to safe execution in both sync and async contexts.
         """
         try:
-            import nest_asyncio
-            nest_asyncio.apply()
+            from src.tools.site_explorer import run_sync
             
             # Sanitize grant_name: remove command-like phrases that shouldn't be in search
             sanitized_grant_name = self._sanitize_grant_name_for_search(grant_name)
@@ -661,7 +659,7 @@ class DrafterAgent:
                 logging.info(f"[DRAFTER] Deep search attempt {i+1}/{len(search_attempts)} ({desc}): {query[:50]}...")
                 
                 # Execute async search
-                found_files = asyncio.run(self._async_playwright_deep_search(search_url, grant_name, user_id))
+                found_files = run_sync(self._async_playwright_deep_search(search_url, grant_name, user_id))
                 
                 if found_files:
                     logging.info(f"[DRAFTER] Found {len(found_files)} files in attempt {i+1}")

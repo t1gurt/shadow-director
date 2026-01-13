@@ -71,6 +71,11 @@ class GrantFinder:
         """
         opportunities = []
         
+        # Validate text parameter
+        if not text or not isinstance(text, str):
+            logging.warning("[GRANT_FINDER] parse_opportunities received invalid text parameter")
+            return opportunities
+        
         # Split by ### 機会 pattern
         sections = re.split(r'###\s*機会\s*\d+:', text)
         
@@ -173,7 +178,12 @@ class GrantFinder:
                     thinking_config=thinking_config
                 )
             )
-            response_text = response.text
+            response_text = response.text if response.text else ""
+            
+            # Validate response_text before parsing
+            if not response_text:
+                logging.warning("[GRANT_FINDER] Empty response from Gemini API")
+                return "検索結果が空でした", []
             
             # Here we could extract grounding metadata as before if needed, 
             # but for now we focus on the text response parsing.
@@ -409,14 +419,11 @@ class GrantFinder:
     def _run_playwright_verification(self, url: str, grant_name: str) -> Optional[Dict[str, Any]]:
         """
         Run Playwright-based page verification.
-        Uses nest_asyncio to allow running async code within Discord.py's event loop.
+        Uses run_sync to safe execution.
         """
         try:
-            import nest_asyncio
-            nest_asyncio.apply()
-            
-            # Now we can safely run asyncio.run() within the existing event loop
-            return asyncio.run(self._async_playwright_verification(url, grant_name))
+            from src.tools.site_explorer import run_sync
+            return run_sync(self._async_playwright_verification(url, grant_name))
         except Exception as e:
             logging.error(f"[GRANT_FINDER] Playwright verification error: {e}")
             return None
@@ -681,9 +688,8 @@ class GrantFinder:
         Use Playwright to find grant page by exploring organization's website.
         """
         try:
-            import nest_asyncio
-            nest_asyncio.apply()
-            return asyncio.run(self._async_playwright_find_grant_page(org_name, grant_name))
+            from src.tools.site_explorer import run_sync
+            return run_sync(self._async_playwright_find_grant_page(org_name, grant_name))
         except Exception as e:
             logging.error(f"[GRANT_FINDER] Playwright search error: {e}")
             return None
