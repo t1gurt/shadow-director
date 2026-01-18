@@ -211,14 +211,65 @@ async def on_message(message):
             # Show typing indicator
             async with message.channel.typing():
                 if orchestrator:
-                    # Always route through orchestrator, which will handle attachments appropriately
-                    # Run potentially blocking synchronous code in a separate thread to avoid blocking the event loop
-                    response = await asyncio.to_thread(
-                        orchestrator.route_message,
-                        user_input, 
-                        str(message.channel.id),
-                        attachments=message.attachments if message.attachments else None
-                    )
+                    # Handle file attachments in async context
+                    if message.attachments:
+                        # Call interviewer's async file processing method directly
+                        # This avoids the asyncio event loop error from threading
+                        try:
+                            response = await orchestrator.interviewer.process_with_files_and_urls(
+                                user_input,
+                                str(message.channel.id),
+                                attachments=message.attachments
+                            )
+                        except ValueError as e:
+                            # MIMEタイプエラー - サポート外のファイル形式
+                            logging.error(f"Unsupported file format: {e}", exc_info=True)
+                            
+                            # Extract filenames from error message or attachments
+                            unsupported_files = [att.filename for att in message.attachments]
+                            
+                            error_response = f"⚠️ **サポートされていないファイル形式が含まれています**\n\n"
+                            error_response += f"**送信されたファイル**: {', '.join([f'`{f}`' for f in unsupported_files])}\n\n"
+                            error_response += f"**エラー詳細**:\n{str(e)}\n\n"
+                            error_response += "---\n\n"
+                            error_response += "**📋 サポートされているファイル形式**:\n\n"
+                            error_response += "**ドキュメント**: PDF, TXT, MD, HTML, CSS, JS, Python, JSON, XML, CSV\n"
+                            error_response += "**画像**: JPEG, PNG, WebP, GIF, HEIC, HEIF\n"
+                            error_response += "**音声**: WAV, MP3, AIFF, AAC, OGG, FLAC\n"
+                            error_response += "**動画**: MP4, MPEG, MOV, AVI, FLV, WebM, WMV, 3GPP\n\n"
+                            error_response += "---\n\n"
+                            error_response += "**💡 解決方法**:\n\n"
+                            error_response += "1. **PowerPoint (.pptx) の場合** → PDFに変換してから送信\n"
+                            error_response += "2. **Word (.docx) の場合** → PDFに変換してから送信\n"
+                            error_response += "3. **Excel (.xlsx) の場合** → PDFまたはCSVに変換してから送信\n"
+                            error_response += "4. **資料の内容を直接テキストで教えていただく** こともできます\n\n"
+                            error_response += "お手数ですが、上記の形式に変換してから再度お試しください。"
+                            
+                            await message.channel.send(error_response)
+                            return
+                        except Exception as e:
+                            # その他のエラー
+                            logging.error(f"File processing error: {e}", exc_info=True)
+                            
+                            error_response = f"⚠️ **ファイルの処理中にエラーが発生しました**\n\n"
+                            error_response += f"**エラー内容**: {str(e)}\n\n"
+                            error_response += "---\n\n"
+                            error_response += "**💡 以下の方法をお試しください**:\n\n"
+                            error_response += "1. ファイルサイズが大きすぎる場合は、小さくしてから再送信\n"
+                            error_response += "2. ファイルが破損していないか確認\n"
+                            error_response += "3. サポートされている形式（PDF、画像など）に変換\n"
+                            error_response += "4. 資料の内容を直接テキストで教えていただく\n\n"
+                            error_response += "もし問題が解決しない場合は、通常の対話形式で情報を教えていただけますか？"
+                            
+                            await message.channel.send(error_response)
+                            return
+                    else:
+                        # No attachments - use normal synchronous routing
+                        response = await asyncio.to_thread(
+                            orchestrator.route_message,
+                            user_input, 
+                            str(message.channel.id)
+                        )
                 else:
                     response = "System initializing... Please wait."
             
