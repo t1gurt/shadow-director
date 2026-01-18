@@ -117,8 +117,8 @@ class ObserverAgent:
         
         valid_opportunities = []
         start_time = time.time()
-        max_workers = 3  # Reduced from 5 to 3 for stability with Cloud Run resources
-        timeout_seconds = 1800  # 30 minutes (increased from 15 minutes for very heavy loads)
+        max_workers = 1  # Reduced to 1 for maximum stability in Cloud Run (browser startup issues)
+        timeout_seconds = 2700  # 45 minutes (increased from 30 minutes for heavy loads with browser startups)
         
         # Run verification in parallel
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

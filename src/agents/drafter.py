@@ -940,6 +940,13 @@ class DrafterAgent:
                         
                         logging.info(f"[DRAFTER] Found {len(fields)} fields in {file_name_orig}")
                         
+                        # Check if field limit was applied and notify user
+                        if hasattr(self.format_mapper, 'last_skipped_field_count') and self.format_mapper.last_skipped_field_count > 0:
+                            skipped = self.format_mapper.last_skipped_field_count
+                            total = self.format_mapper.last_total_field_count
+                            logging.warning(f"[DRAFTER] Field limit applied: {total} fields found, limited to 50")
+                            message += f"\n\n⚠️ 申請書の項目数が多いため（{total}項目）、重要度の高い50項目に絞って入力します。\nスキップされた{skipped}項目は手動で入力してください。"
+                        
                         # Fill fields individually using profile (field-by-field processing)
                         # Note: No Discord notification per field - progress is logged only
                         field_values = self.format_mapper.fill_fields_individually(

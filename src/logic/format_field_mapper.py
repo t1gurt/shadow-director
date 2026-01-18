@@ -45,6 +45,10 @@ class FormatFieldMapper:
         self.model_name = model_name
         self.logger = logging.getLogger(__name__)
         
+        # フィールド制限の情報を保持
+        self.last_skipped_field_count = 0
+        self.last_total_field_count = 0
+        
         if not self.client:
             try:
                 from src.utils.gemini_client import get_gemini_client
@@ -1178,6 +1182,112 @@ JSONのみを出力してください。
         
         return "unknown"
     
+    def _calculate_field_importance(self, field: FieldInfo, field_index: int = 0) -> int:
+        """
+        フィールドの重要度をスコアリングする。
+        
+        Args:
+            field: 評価対象のフィールド
+            field_index: フィールドの順序（0から始まる）
+            
+        Returns:
+            重要度スコア（高いほど重要）
+        """
+        score = 0
+        field_name_lower = field.field_name.lower()
+        
+        # 1. 必須フラグ: +50点
+        if field.required:
+            score += 50
+        
+        # 2. キーワードマッチング
+        # 最優先キーワード: +30点
+        high_priority_keywords = ['団体名', '法人名', '代表者', '連絡先', '電話', 'tel', 'email', 'メールアドレス', '住所']
+        for kw in high_priority_keywords:
+            if kw in field_name_lower:
+                score += 30
+                break
+        
+        # 重要キーワード: +20点
+        important_keywords = ['事業名', '目的', '概要', 'プロジェクト', '計画', '活動', '取り組み']
+        for kw in important_keywords:
+            if kw in field_name_lower:
+                score += 20
+                break
+        
+        # 金額関連: +15点
+        amount_keywords = ['金額', '予算', '費用', 'cost', '円']
+        for kw in amount_keywords:
+            if kw in field_name_lower:
+                score += 15
+                break
+        
+        # 3. フィールドタイプ
+        # 長文フィールド（詳細な記述が必要）: +10点
+        if field.input_length_type == "long":
+            score += 10
+        # 短文フィールド: +5点
+        elif field.input_length_type == "short":
+            score += 5
+        
+        # 4. 位置による加点（最初の方のフィールド）
+        # 先頭から30フィールド以内: 位置に応じて最大+5点
+        if field_index < 30:
+            score += max(5 - (field_index // 6), 0)
+        
+        # 5. 文字数制限がある場合: +3点（正式な制限があるフィールドは重要度が高い）
+        if field.max_length and field.max_length > 0:
+            score += 3
+        
+        return score
+    
+    def _limit_fields_by_importance(self, fields: List[FieldInfo], max_fields: int = 50) -> Tuple[List[FieldInfo], int]:
+        """
+        フィールドを重要度順にソートし、上限数に制限する。
+        
+        Args:
+            fields: フィールドのリスト
+            max_fields: 最大フィールド数（デフォルト: 50）
+            
+        Returns:
+            (制限後のフィールドリスト, 元のフィールド数)
+        """
+        original_count = len(fields)
+        
+        # フィールド数が上限以下の場合はそのまま返す
+        if original_count <= max_fields:
+            self.logger.info(f"[FORMAT_MAPPER] Field count ({original_count}) is within limit ({max_fields})")
+            return fields, original_count
+        
+        # 重要度スコアを計算
+        field_scores = []
+        for idx, field in enumerate(fields):
+            score = self._calculate_field_importance(field, idx)
+            field_scores.append((field, score))
+            self.logger.debug(f"[FORMAT_MAPPER] Field '{field.field_name}' (ID: {field.field_id}): importance score = {score}")
+        
+        # スコアでソート（降順）
+        field_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # 上位max_fieldsフィールドを選択
+        selected_fields = [field for field, score in field_scores[:max_fields]]
+        
+        # ログ出力
+        self.logger.warning(
+            f"[FORMAT_MAPPER] Field limit applied: {original_count} fields found, "
+            f"limited to top {max_fields} by importance. "
+            f"Skipped {original_count - max_fields} fields."
+        )
+        
+        # スキップされたフィールドの例を出力（デバッグ用）
+        skipped_fields = [field for field, score in field_scores[max_fields:max_fields+5]]
+        if skipped_fields:
+            skipped_names = [f.field_name for f in skipped_fields]
+            self.logger.info(f"[FORMAT_MAPPER] Examples of skipped fields: {', '.join(skipped_names[:5])}")
+        
+        return selected_fields, original_count
+
+    
     def map_draft_to_fields(
         self, 
         fields: List[FieldInfo], 
@@ -1209,10 +1319,18 @@ JSONのみを出力してください。
             return {}
         
         try:
+            # フィールド数制限（大量の項目がある場合は重要度順に選択）
+            limited_fields, original_count = self._limit_fields_by_importance(fields, max_fields=50)
+            skipped_count = original_count - len(limited_fields)
+            
+            # 制限情報を保存（drafter側で参照可能にする）
+            self.last_total_field_count = original_count
+            self.last_skipped_field_count = skipped_count
+            
             # フィールド情報をプロンプト用にフォーマット
             fields_prompt = "\n".join([
                 f"- field_id: {f.field_id}\n  名前: {f.field_name}\n  説明: {f.description or '不明'}\n  文字数制限: {f.max_length or '制限なし'}\n  入力タイプ: {f.input_length_type}"
-                for f in fields
+                for f in limited_fields
             ])
             
             prompt = f"""
