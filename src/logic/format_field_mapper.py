@@ -305,7 +305,7 @@ class FormatFieldMapper:
 
             # テーブルからフィールドを検出
             for table_idx, table in enumerate(doc.tables):
-                table_fields = self._analyze_word_table(table, table_idx)
+                table_fields = self._analyze_word_table(table, table_idx, block_items)
                 fields.extend(table_fields)
             
             # 段落からフィールドを検出（順序情報を渡す）
@@ -588,14 +588,15 @@ class FormatFieldMapper:
         
         return fields
     
-    def _analyze_word_table(self, table, table_idx: int) -> List[FieldInfo]:
+    def _analyze_word_table(self, table, table_idx: int, block_items=None) -> List[FieldInfo]:
         """
         Wordテーブルからフィールドを検出（複数パターン対応）
         
         対応パターン:
-        1. ラベル | 入力欄（空） のペア
-        2. 1行に複数の ラベル | 入力欄 ペアがある場合
-        3. ヘッダー行 + データ行パターン（例：｜項目｜金額｜説明｜）
+        1. 1セル(1行1列)のテーブル（新規対応）
+        2. ラベル | 入力欄（空） のペア
+        3. 1行に複数の ラベル | 入力欄 ペアがある場合
+        4. ヘッダー行 + データ行パターン（例：｜項目｜金額｜説明｜）
         """
         fields = []
         
@@ -603,6 +604,11 @@ class FormatFieldMapper:
             rows = list(table.rows)
             if not rows:
                 return fields
+            
+            # 1セルテーブルの場合は専用ロジック
+            if len(rows) == 1 and len(rows[0].cells) == 1:
+                self.logger.info(f"[FORMAT_MAPPER] Table {table_idx}: detected single-cell table")
+                return self._detect_single_cell_pattern(table, table_idx, block_items)
             
             # まず既存のラベル→入力パターンで検出を試みる
             label_input_fields = self._detect_label_input_pattern(table, table_idx, rows)
@@ -622,6 +628,162 @@ class FormatFieldMapper:
             self.logger.warning(f"[FORMAT_MAPPER] Error analyzing Word table: {e}")
         
         return fields
+    
+    def _detect_single_cell_pattern(self, table, table_idx: int, block_items=None) -> List[FieldInfo]:
+        """
+        1セル(1行1列)のテーブルを検出する。
+        
+        対応パターン:
+        1. 段落ラベル + 1セルテーブル(入力欄)
+           例: <メールアドレス> (段落)
+               ┌────────┐
+               │        │ (1セルテーブル)
+               └────────┘
+        
+        2. 1セル内にラベル + プレースホルダー
+           例: ┌──────────────┐
+               │ ラベル：____ │
+               └──────────────┘
+        
+        Args:
+            table: Wordのテーブルオブジェクト
+            table_idx: テーブルのインデックス
+            block_items: ドキュメント要素の順序リスト（任意）
+        
+        Returns:
+            検出されたフィールドのリスト
+        """
+        fields = []
+        
+        try:
+            cell = table.rows[0].cells[0]
+            cell_text = cell.text.strip()
+            
+            # パターン2: 1セル内にラベル + プレースホルダー
+            # 下線プレースホルダー: "ラベル：_____"
+            # 括弧プレースホルダー: "ラベル：（　）"
+            import re
+            
+            # 下線パターン
+            underline_match = re.search(r'(.+?)[:：]\s*[_＿]{3,}', cell_text)
+            if underline_match:
+                field = FieldInfo(
+                    field_id=f"table{table_idx}_0_0",
+                    field_name=underline_match.group(1).strip(),
+                    field_type="table_cell",
+                    location={
+                        "table_idx": table_idx,
+                        "row": 0,
+                        "col": 0,
+                        "input_pattern": "single_cell_underline"
+                    }
+                )
+                fields.append(field)
+                self.logger.info(f"[FORMAT_MAPPER] Single-cell table {table_idx}: detected underline pattern")
+                return fields
+            
+            # 括弧パターン
+            bracket_match = re.search(r'(.+?)[(（]\s*[　\s]*[)）]', cell_text)
+            if bracket_match:
+                field = FieldInfo(
+                    field_id=f"table{table_idx}_0_0",
+                    field_name=bracket_match.group(1).strip(),
+                    field_type="table_cell",
+                    location={
+                        "table_idx": table_idx,
+                        "row": 0,
+                        "col": 0,
+                        "input_pattern": "single_cell_bracket"
+                    }
+                )
+                fields.append(field)
+                self.logger.info(f"[FORMAT_MAPPER] Single-cell table {table_idx}: detected bracket pattern")
+                return fields
+            
+            # パターン1: 空セルまたはプレースホルダーのみ → 直前の段落がラベル
+            is_empty = not cell_text
+            is_placeholder = cell_text and (
+                all(c in '_＿　 ' for c in cell_text) or
+                cell_text in ['（　）', '(　)', '（）', '()']
+            )
+            
+            if is_empty or is_placeholder:
+                # 直前の段落をラベルとして検索
+                label = self._find_label_before_table(table_idx, block_items)
+                
+                if label:
+                    field = FieldInfo(
+                        field_id=f"table{table_idx}_0_0",
+                        field_name=label,
+                        field_type="table_cell",
+                        location={
+                            "table_idx": table_idx,
+                            "row": 0,
+                            "col": 0,
+                            "input_pattern": "single_cell_with_paragraph_label"
+                        }
+                    )
+                    fields.append(field)
+                    self.logger.info(f"[FORMAT_MAPPER] Single-cell table {table_idx}: detected with paragraph label '{label}'")
+                else:
+                    # ラベルが見つからない場合でも、空の1セルテーブルとして検出
+                    field = FieldInfo(
+                        field_id=f"table{table_idx}_0_0",
+                        field_name=f"テーブル{table_idx}",
+                        field_type="table_cell",
+                        location={
+                            "table_idx": table_idx,
+                            "row": 0,
+                            "col": 0,
+                            "input_pattern": "single_cell_no_label"
+                        }
+                    )
+                    fields.append(field)
+                    self.logger.info(f"[FORMAT_MAPPER] Single-cell table {table_idx}: detected without label")
+        
+        except Exception as e:
+            self.logger.warning(f"[FORMAT_MAPPER] Error detecting single-cell table: {e}")
+        
+        return fields
+    
+    def _find_label_before_table(self, table_idx: int, block_items=None) -> Optional[str]:
+        """
+        テーブルの直前の段落からラベルを取得する。
+        
+        Args:
+            table_idx: テーブルのインデックス
+            block_items: ドキュメント要素の順序リスト
+        
+        Returns:
+            ラベル文字列、見つからない場合はNone
+        """
+        if not block_items:
+            return None
+        
+        try:
+            # block_items内のテーブル要素を探す
+            for idx, item in enumerate(block_items):
+                if item["type"] == "table" and item["index"] == table_idx:
+                    # 直前の要素を確認
+                    if idx > 0:
+                        prev_item = block_items[idx - 1]
+                        if prev_item["type"] == "paragraph":
+                            # 段落のテキストを取得
+                            para_text = prev_item["obj"].text.strip()
+                            
+                            # ラベルとして適切か判定（短く、特定のパターンに一致）
+                            # 例: "<メールアドレス>", "団体名：", "1. 団体登録ID"
+                            if para_text and len(para_text) < 100:
+                                # 末尾のコロンや記号を除去
+                                import re
+                                label = re.sub(r'[:：]+\s*$', '', para_text)
+                                # 番号付きラベルの場合、番号を含める
+                                return label
+            
+        except Exception as e:
+            self.logger.warning(f"[FORMAT_MAPPER] Error finding label before table: {e}")
+        
+        return None
     
     def _detect_label_input_pattern(self, table, table_idx: int, rows) -> List[FieldInfo]:
         """ラベル→入力欄のペアパターンを検出"""

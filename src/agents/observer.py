@@ -226,18 +226,39 @@ class ObserverAgent:
         """
         Helper method to verify a single opportunity in a thread.
         This allows parallel execution of grant verification.
+        
+        Handles all exceptions including Playwright timeouts to ensure
+        the task completes gracefully even when browser startup fails.
         """
         title = opp.get('title')
         
-        # Note: ProgressNotifier inside find_official_page might need to be thread-safe
-        # For now we rely on it being mostly stateless or handled by the external notify service
-        
-        # 2. Find and Validate Official Page using GrantFinder
-        # This includes Google Search, URL validation, and potentially Playwright
-        official_info = self.finder.find_official_page(title, current_date_str)
-        
-        # Merge results - create a copy to avoid race conditions if any
-        verified_opp = opp.copy()
-        verified_opp.update(official_info)
-        
-        return verified_opp
+        try:
+            # Note: ProgressNotifier inside find_official_page might need to be thread-safe
+            # For now we rely on it being mostly stateless or handled by the external notify service
+            
+            # 2. Find and Validate Official Page using GrantFinder
+            # This includes Google Search, URL validation, and potentially Playwright
+            official_info = self.finder.find_official_page(title, current_date_str)
+            
+            # Merge results - create a copy to avoid race conditions if any
+            verified_opp = opp.copy()
+            verified_opp.update(official_info)
+            
+            return verified_opp
+            
+        except Exception as e:
+            # Handle all exceptions including Playwright browser startup timeout
+            logging.error(f"[OBSERVER] Error verifying grant '{title}': {e}")
+            
+            # Return a safe result with error information
+            verified_opp = opp.copy()
+            verified_opp.update({
+                'official_url': 'N/A',
+                'is_valid': False,
+                'status': '検証エラー',
+                'exclude_reason': f'検証中にエラーが発生: {type(e).__name__}',
+                'error_details': str(e)[:200],  # Limit error message length
+                'verification_failed': True
+            })
+            
+            return verified_opp

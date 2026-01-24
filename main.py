@@ -346,8 +346,11 @@ async def on_message(message):
                                         logging.error(f"[FORMAT_FILE] Failed to delete oversized file: {del_err}")
                                 else:
                                     filename = os.path.basename(file_path)
-                                    discord_file = discord.File(file_path, filename=filename)
-                                    await message.channel.send(file=discord_file)
+                                    # Read file as binary to handle Japanese filenames properly
+                                    with open(file_path, 'rb') as f:
+                                        file_bytes = io.BytesIO(f.read())
+                                        discord_file = discord.File(file_bytes, filename=filename)
+                                        await message.channel.send(file=discord_file)
                                     logging.info(f"[FORMAT_FILE] File sent: {filename}")
                                     
                                     # Delete file after successful send
@@ -407,8 +410,11 @@ async def on_message(message):
                                         logging.error(f"[FILLED_FILE] Failed to delete oversized file: {del_err}")
                                 else:
                                     filename = os.path.basename(file_path)
-                                    discord_file = discord.File(file_path, filename=filename)
-                                    await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
+                                    # Read file as binary to handle Japanese filenames properly
+                                    with open(file_path, 'rb') as f:
+                                        file_bytes = io.BytesIO(f.read())
+                                        discord_file = discord.File(file_bytes, filename=filename)
+                                        await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
                                     logging.info(f"[FILLED_FILE] File sent: {filename}")
                                     
                                     # Delete file after successful send
@@ -579,8 +585,11 @@ async def on_message(message):
                                     file_size = os.path.getsize(file_path)
                                     if file_size <= 25 * 1024 * 1024:
                                         filename = os.path.basename(file_path)
-                                        discord_file = discord.File(file_path, filename=filename)
-                                        await message.channel.send(file=discord_file)
+                                        # Read file as binary to handle Japanese filenames properly
+                                        with open(file_path, 'rb') as f:
+                                            file_bytes = io.BytesIO(f.read())
+                                            discord_file = discord.File(file_bytes, filename=filename)
+                                            await message.channel.send(file=discord_file)
                                         logging.info(f"[PROGRESS_CB] Sent format file: {filename}")
                                         try:
                                             os.remove(file_path)
@@ -650,6 +659,7 @@ async def on_message(message):
                         if "[FORMAT_FILE_NEEDED:" in draft_result:
                             import re
                             import io
+                            import os
                             
                             format_file_matches = re.findall(r'\[FORMAT_FILE_NEEDED:([^:]+):([^\]]+)\]', draft_result)
                             for user_id_f, file_path in format_file_matches:
@@ -659,8 +669,11 @@ async def on_message(message):
                                         file_size = os.path.getsize(file_path)
                                         if file_size <= 25 * 1024 * 1024:
                                             filename = os.path.basename(file_path)
-                                            discord_file = discord.File(file_path, filename=filename)
-                                            await message.channel.send(file=discord_file)
+                                            # Read file as binary to handle Japanese filenames properly
+                                            with open(file_path, 'rb') as f:
+                                                file_bytes = io.BytesIO(f.read())
+                                                discord_file = discord.File(file_bytes, filename=filename)
+                                                await message.channel.send(file=discord_file)
                                             try:
                                                 os.remove(file_path)
                                             except:
@@ -680,8 +693,11 @@ async def on_message(message):
                                         file_size = os.path.getsize(file_path)
                                         if file_size <= 25 * 1024 * 1024:
                                             filename = os.path.basename(file_path)
-                                            discord_file = discord.File(file_path, filename=filename)
-                                            await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
+                                            # Read file as binary to handle Japanese filenames properly
+                                            with open(file_path, 'rb') as f:
+                                                file_bytes = io.BytesIO(f.read())
+                                                discord_file = discord.File(file_bytes, filename=filename)
+                                                await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
                                             try:
                                                 os.remove(file_path)
                                             except:
