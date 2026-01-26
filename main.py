@@ -9,6 +9,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 import asyncio
+import urllib.parse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -345,7 +346,7 @@ async def on_message(message):
                                     except Exception as del_err:
                                         logging.error(f"[FORMAT_FILE] Failed to delete oversized file: {del_err}")
                                 else:
-                                    filename = os.path.basename(file_path)
+                                    filename = urllib.parse.unquote(os.path.basename(file_path))
                                     # Read file as binary to handle Japanese filenames properly
                                     with open(file_path, 'rb') as f:
                                         file_bytes = io.BytesIO(f.read())
@@ -409,7 +410,7 @@ async def on_message(message):
                                     except Exception as del_err:
                                         logging.error(f"[FILLED_FILE] Failed to delete oversized file: {del_err}")
                                 else:
-                                    filename = os.path.basename(file_path)
+                                    filename = urllib.parse.unquote(os.path.basename(file_path))
                                     # Read file as binary to handle Japanese filenames properly
                                     with open(file_path, 'rb') as f:
                                         file_bytes = io.BytesIO(f.read())
@@ -446,13 +447,39 @@ async def on_message(message):
                     for match in re.finditer(r'\[ATTACHMENT_NEEDED:([^:]+):([^\]]+)\]', response):
                         response = response.replace(match.group(0), '').strip()
                     
-                    # Ensure response is within Discord's 2000 char limit
-                    MAX_LENGTH = 2000
-                    if len(response) > MAX_LENGTH:
-                        response = response[:MAX_LENGTH - 50] + "\n\n...(省略)..."
+                    # Split long messages into multiple Discord messages (2000 char limit)
+                    MAX_LENGTH = 1900  # Leave some buffer
                     
-                    # Send response text first
-                    await message.channel.send(response)
+                    async def send_long_message(channel, text):
+                        """Split and send long messages"""
+                        if len(text) <= MAX_LENGTH:
+                            await channel.send(text)
+                            return
+                        
+                        # Try to split at section boundaries (---)
+                        parts = []
+                        current_part = ""
+                        
+                        for line in text.split('\n'):
+                            if len(current_part) + len(line) + 1 > MAX_LENGTH:
+                                if current_part:
+                                    parts.append(current_part)
+                                current_part = line
+                            else:
+                                current_part += ('\n' if current_part else '') + line
+                        
+                        if current_part:
+                            parts.append(current_part)
+                        
+                        # Send each part
+                        for i, part in enumerate(parts):
+                            if part.strip():
+                                if i > 0:
+                                    part = f"**(続き {i+1}/{len(parts)})**\n" + part
+                                await channel.send(part)
+                    
+                    # Send response text in chunks
+                    await send_long_message(message.channel, response)
                     
                     # Process each attachment
                     for user_id, filename_hint in matches:
@@ -584,7 +611,7 @@ async def on_message(message):
                                 if os.path.exists(file_path):
                                     file_size = os.path.getsize(file_path)
                                     if file_size <= 25 * 1024 * 1024:
-                                        filename = os.path.basename(file_path)
+                                        filename = urllib.parse.unquote(os.path.basename(file_path))
                                         # Read file as binary to handle Japanese filenames properly
                                         with open(file_path, 'rb') as f:
                                             file_bytes = io.BytesIO(f.read())
@@ -668,7 +695,7 @@ async def on_message(message):
                                     if os.path.exists(file_path):
                                         file_size = os.path.getsize(file_path)
                                         if file_size <= 25 * 1024 * 1024:
-                                            filename = os.path.basename(file_path)
+                                            filename = urllib.parse.unquote(os.path.basename(file_path))
                                             # Read file as binary to handle Japanese filenames properly
                                             with open(file_path, 'rb') as f:
                                                 file_bytes = io.BytesIO(f.read())
@@ -692,7 +719,7 @@ async def on_message(message):
                                     if os.path.exists(file_path):
                                         file_size = os.path.getsize(file_path)
                                         if file_size <= 25 * 1024 * 1024:
-                                            filename = os.path.basename(file_path)
+                                            filename = urllib.parse.unquote(os.path.basename(file_path))
                                             # Read file as binary to handle Japanese filenames properly
                                             with open(file_path, 'rb') as f:
                                                 file_bytes = io.BytesIO(f.read())

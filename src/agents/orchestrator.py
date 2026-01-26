@@ -439,6 +439,20 @@ class Orchestrator:
             if content:
                 # Success: send minimal message with attachment marker
                 response += f"✅ ドラフト作成完了\n📄 マークダウン形式のドラフトも送信します...\n[ATTACHMENT_NEEDED:{user_id}:{filename}]"
+                
+                # Add quality report and director review from drafter message
+                # Extract report sections from message (they start with ## markers)
+                import re
+                report_match = re.search(r'(## 📊 ドラフト品質レポート[\s\S]*?)(?=\n## 📝|\Z)', message)
+                review_match = re.search(r'(## 📝 事務局長レビュー[\s\S]*)', message)
+                
+                if report_match or review_match:
+                    response += "\n\n---\n"
+                    if report_match:
+                        response += f"\n{report_match.group(1).strip()}\n"
+                    if review_match:
+                        response += f"\n{review_match.group(1).strip()}\n"
+                
                 return response
             else:
                 # Error occurred
@@ -769,6 +783,18 @@ URL: {grant_url}
                 
                 if content:
                     grant_result += f"✅ ドラフト作成完了\n[ATTACHMENT_NEEDED:{user_id}:{filename}]\n"
+                    
+                    # Add quality report and director review from drafter message
+                    import re
+                    report_match = re.search(r'(## 📊 ドラフト品質レポート[\s\S]*?)(?=\n## 📝|\Z)', message)
+                    review_match = re.search(r'(## 📝 事務局長レビュー[\s\S]*)', message)
+                    
+                    if report_match or review_match:
+                        grant_result += "\n---\n"
+                        if report_match:
+                            grant_result += f"\n{report_match.group(1).strip()}\n"
+                        if review_match:
+                            grant_result += f"\n{review_match.group(1).strip()}\n"
                 else:
                     grant_result += f"⚠️ ドラフト作成エラー: {message}\n"
             except Exception as e:

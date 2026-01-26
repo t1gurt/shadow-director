@@ -350,13 +350,19 @@ class GrantFinder:
                 result['url_quality_score'] = quality_score
                 result['url_quality_reason'] = quality_reason
                 
-                # Notify user about URL quality
+                # Agent Thought: 判断根拠を先に表示（脳内開示）
+                notifier.notify_thought(
+                    f"[{grant_display_name}] ドメイン解析完了",
+                    quality_reason
+                )
+                
+                # Notify user about URL quality with enhanced format
                 if quality_score >= 70:
-                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ✅ 信頼性評価: {quality_score}点", quality_reason)
+                    notifier.notify_sync(ProgressStage.VERIFYING, f"[{grant_display_name}] ➡ 信頼性評価: {quality_score}点 (Verified)", None)
                 elif quality_score >= 50:
-                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ⚠️ 信頼性評価: {quality_score}点", quality_reason)
+                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ➡ 信頼性評価: {quality_score}点", None)
                 else:
-                    notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ❌ 信頼性評価: {quality_score}点（低）", quality_reason)
+                    notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ➡ 信頼性評価: {quality_score}点（低）", None)
                 
                 if quality_score < 50:
                     logging.warning(f"[GRANT_FINDER] Low quality URL: {result['official_url']}")
@@ -383,23 +389,39 @@ class GrantFinder:
                         playwright_result = self._run_playwright_verification(final_url, grant_name)
                         
                         if playwright_result:
-                            result['playwright_verified'] = True
-                            result['playwright_confidence'] = playwright_result.get('confidence', 0)
-                            result['format_files'] = playwright_result.get('format_files', [])
-                            
-                            # Notify Playwright results
-                            file_count = len(result.get('format_files', []))
-                            if file_count > 0:
-                                notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📎 フォーマットファイル {file_count}件 発見", "申請書様式を検出しました")
-                            
-                            # Update deadline info if found
-                            if playwright_result.get('deadline_info'):
-                                deadline = playwright_result['deadline_info']
-                                if deadline.get('date'):
-                                    result['deadline_end'] = deadline['date']
-                                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📅 締切日: {deadline['date']}", "ページから締切日を抽出しました")
-                            
-                            logging.info(f"[GRANT_FINDER] Playwright found {file_count} format files")
+                            # 障害検知の確認（ログイン壁、404等）
+                            if playwright_result.get('obstacle_detected'):
+                                obstacle_type = playwright_result.get('obstacle_type', '不明な障害')
+                                page_title = playwright_result.get('title', '')
+                                
+                                # 障害検知を表示
+                                notifier.notify_obstacle(obstacle_type, f"ページタイトル: \"{page_title}\"")
+                                
+                                # Agent Thought: 障害への対応を説明
+                                notifier.notify_thought(
+                                    f"[{grant_display_name}] 障害を検出",
+                                    f"このURLは{obstacle_type}です。公募情報を取得できないため、代替ルートを探索する必要があります。"
+                                )
+                                
+                                logging.warning(f"[GRANT_FINDER] Obstacle detected: {obstacle_type}")
+                            else:
+                                result['playwright_verified'] = True
+                                result['playwright_confidence'] = playwright_result.get('confidence', 0)
+                                result['format_files'] = playwright_result.get('format_files', [])
+                                
+                                # Notify Playwright results
+                                file_count = len(result.get('format_files', []))
+                                if file_count > 0:
+                                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📎 フォーマットファイル {file_count}件 発見", "申請書様式を検出しました")
+                                
+                                # Update deadline info if found
+                                if playwright_result.get('deadline_info'):
+                                    deadline = playwright_result['deadline_info']
+                                    if deadline.get('date'):
+                                        result['deadline_end'] = deadline['date']
+                                        notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📅 締切日: {deadline['date']}", "ページから締切日を抽出しました")
+                                
+                                logging.info(f"[GRANT_FINDER] Playwright found {file_count} format files")
                         else:
                             notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ℹ️ Playwright検証完了", "追加情報は見つかりませんでした")
                     except Exception as pw_error:
@@ -548,7 +570,17 @@ class GrantFinder:
         # Create shortened grant name for display (max 20 chars)
         grant_display_name = grant_name[:20] + "..." if len(grant_name) > 20 else grant_name
         
-        notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ⚠️ URL検証失敗", f"代替URLを検索中... ({failure_reason})")
+        # 障害検知を表示（リカバリー演出）
+        notifier.notify_obstacle("アクセス不能", f"[{grant_display_name}] {failure_reason}")
+        
+        # Agent Thought: 戦略変更の思考プロセスを表示
+        notifier.notify_thought(
+            f"[{grant_display_name}] 戦略変更",
+            f"指定されたURLにアクセスできないため、助成金名をキーに一般公開されている公式ページをGoogle検索で探します。"
+        )
+        
+        # リカバリー演出: 再検索開始
+        notifier.notify_recovery(f"[{grant_display_name}] 再検索を実行中...", "代替URLを探索")
         
         # Extract organization name for targeted retry search
         org_name = self.validator.extract_organization_name(grant_name)

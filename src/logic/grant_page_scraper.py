@@ -131,8 +131,16 @@ class GrantPageScraper:
             
             # Get page info
             page_info = await explorer.get_page_info(page)
-            result['title'] = page_info.get('title')
+            title = page_info.get('title', '')
+            result['title'] = title
             result['url'] = page_info.get('url', url)  # May have been redirected
+            
+            # 障害パターン検知（ログイン壁、404、アクセス拒否など）
+            obstacle_type = self._detect_obstacle(title)
+            if obstacle_type:
+                result['obstacle_detected'] = True
+                result['obstacle_type'] = obstacle_type
+                self.logger.info(f"[GRANT_SCRAPER] 障害検知: {obstacle_type} (title: {title})")
             
             # Extract all links
             all_links = await explorer.extract_links(page)
@@ -923,4 +931,44 @@ class GrantPageScraper:
                 })
         
         return dom_files
-
+    
+    # ====== 障害検知メソッド ======
+    
+    # 障害パターン定義（タイトルに含まれるキーワード -> 障害タイプ）
+    OBSTACLE_PATTERNS = {
+        'sign in': 'ログイン壁',
+        'login': 'ログイン壁',
+        'ログイン': 'ログイン壁',
+        'サインイン': 'ログイン壁',
+        '404': 'ページ未発見',
+        'not found': 'ページ未発見',
+        '見つかりません': 'ページ未発見',
+        'ページが見つかりません': 'ページ未発見',
+        'access denied': 'アクセス拒否',
+        'forbidden': 'アクセス拒否',
+        'アクセスが拒否': 'アクセス拒否',
+        '403': 'アクセス拒否',
+        'error': 'エラーページ',
+        'エラー': 'エラーページ',
+    }
+    
+    def _detect_obstacle(self, title: str) -> str:
+        """
+        ページタイトルから障害パターンを検出する。
+        
+        Args:
+            title: ページタイトル
+            
+        Returns:
+            障害タイプ（例: "ログイン壁", "ページ未発見"）、検出されなければ空文字列
+        """
+        if not title:
+            return ""
+        
+        title_lower = title.lower()
+        
+        for pattern, obstacle_type in self.OBSTACLE_PATTERNS.items():
+            if pattern.lower() in title_lower:
+                return obstacle_type
+        
+        return ""

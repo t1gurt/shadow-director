@@ -1707,13 +1707,68 @@ JSONのみを出力してください。
                     value = re.sub(r'\s*\[UNCERTAIN:[^\]]+\]', '', value).strip()
                     self.logger.info(f"[FORMAT_MAPPER] Field {field.field_name} is uncertain: {concern_reason}")
                 
-                # 文字数制限チェック & 省略記号検知
-                if field.max_length and len(value) > field.max_length:
-                    self.logger.warning(f"[FORMAT_MAPPER] Field {field.field_id} exceeded max length ({len(value)} > {field.max_length}). Value: {value[:20]}...")
+                # 文字数制限チェック & 自動リトライ
+                max_retries = 2
+                retry_count = 0
+                original_value = value
                 
+                while field.max_length and len(value) > field.max_length and retry_count < max_retries:
+                    retry_count += 1
+                    overflow_chars = len(value) - field.max_length
+                    self.logger.warning(
+                        f"[FORMAT_MAPPER] Field {field.field_id} exceeded max length "
+                        f"({len(value)} > {field.max_length}, over by {overflow_chars}). Retry {retry_count}/{max_retries}"
+                    )
+                    
+                    # 短縮リトライプロンプト
+                    retry_prompt = f"""前回の回答が{field.max_length}字の制限を{overflow_chars}字オーバーしました。
+以下の回答を**必ず{field.max_length}字以内**に短縮してください。
+
+# 短縮対象の回答
+{value}
+
+# 短縮の指示
+1. 制限の90%である{int(field.max_length * 0.9)}字程度を目標にしてください
+2. 重要な情報を残しつつ、冗長な表現を削除してください
+3. 体言止めや簡潔な表現を活用してください
+4. 「...」「…」での省略は禁止です
+5. 短縮後の文章のみを出力してください
+
+# 短縮後の回答:"""
+
+                    try:
+                        retry_response = self.client.models.generate_content(
+                            model=flash_model,
+                            contents=retry_prompt
+                        )
+                        value = retry_response.text.strip()
+                        self.logger.info(
+                            f"[FORMAT_MAPPER] Retry {retry_count}: shortened to {len(value)} chars "
+                            f"(limit: {field.max_length})"
+                        )
+                    except Exception as retry_error:
+                        self.logger.error(f"[FORMAT_MAPPER] Retry failed: {retry_error}")
+                        break
+                
+                # 最終的な文字数超過チェック
+                if field.max_length and len(value) > field.max_length:
+                    overflow_chars = len(value) - field.max_length
+                    overflow_percentage = (overflow_chars / field.max_length) * 100
+                    self.logger.warning(
+                        f"[FORMAT_MAPPER] Field {field.field_id} still exceeds limit after retries "
+                        f"({len(value)} > {field.max_length}, {overflow_percentage:.1f}% over)"
+                    )
+                    # 懸念点として記録（既存の懸念がなければ）
+                    if concern_type == "none":
+                        concern_type = "length_exceeded"
+                        concern_reason = f"{field.max_length}字制限を{overflow_chars}字超過（{overflow_percentage:.1f}%オーバー）"
+                
+                # 省略記号検知
                 if value.endswith("...") or value.endswith("…"):
-                     self.logger.warning(f"[FORMAT_MAPPER] Field {field.field_id} ends with ellipsis. VLM failed to summarize properly.")
-                     # ここではあえて削除せず、ユーザーに修正を促す（または自動再生成ロジックを入れる余地あり）
+                    self.logger.warning(f"[FORMAT_MAPPER] Field {field.field_id} ends with ellipsis")
+                    if concern_type == "none":
+                        concern_type = "truncated"
+                        concern_reason = "回答が省略記号で終わっています。手動で修正が必要です。"
                 
                 # 結果を格納（懸念点情報を含む）
                 result[field.field_id] = {
@@ -1724,7 +1779,10 @@ JSONのみを出力してください。
                     "location": field.location,
                     "input_length_type": field.input_length_type,
                     "concern_type": concern_type,
-                    "concern_reason": concern_reason
+                    "concern_reason": concern_reason,
+                    "max_length": field.max_length,
+                    "actual_length": len(value),
+                    "retry_count": retry_count
                 }
                 
                 self.logger.info(f"[FORMAT_MAPPER] Successfully filled field: {field.field_name} ({len(value)} chars, concern: {concern_type})")
@@ -1768,23 +1826,37 @@ JSONのみを出力してください。
     
     def generate_concern_report(self, field_values: Dict[str, Any]) -> str:
         """
-        入力結果から懸念点レポートを生成する。
+        入力結果から懸念点レポートを生成する（強化版）。
         
         Args:
             field_values: fill_fields_individuallyの戻り値
             
         Returns:
-            Markdown形式のレポート
+            Markdown形式のレポート（品質スコア付き）
         """
         missing_info_fields = []
         uncertain_fields = []
+        length_exceeded_fields = []
+        truncated_fields = []
+        
+        # 品質スコア計算用
+        total_fields = len(field_values)
+        good_fields = 0
+        retry_total = 0
         
         for field_id, data in field_values.items():
             concern_type = data.get("concern_type", "none")
             concern_reason = data.get("concern_reason", "")
             field_name = data.get("field_name", field_id)
+            retry_count = data.get("retry_count", 0)
+            max_length = data.get("max_length")
+            actual_length = data.get("actual_length", 0)
             
-            if concern_type == "missing_info":
+            retry_total += retry_count
+            
+            if concern_type == "none":
+                good_fields += 1
+            elif concern_type == "missing_info":
                 missing_info_fields.append({
                     "field_name": field_name,
                     "reason": concern_reason
@@ -1794,22 +1866,81 @@ JSONのみを出力してください。
                     "field_name": field_name,
                     "reason": concern_reason
                 })
+            elif concern_type == "length_exceeded":
+                length_exceeded_fields.append({
+                    "field_name": field_name,
+                    "reason": concern_reason,
+                    "max_length": max_length,
+                    "actual_length": actual_length
+                })
+            elif concern_type == "truncated":
+                truncated_fields.append({
+                    "field_name": field_name,
+                    "reason": concern_reason
+                })
         
-        # レポートが不要な場合
-        if not missing_info_fields and not uncertain_fields:
-            return ""
+        # 品質スコアを計算（0-100）
+        if total_fields > 0:
+            quality_score = int((good_fields / total_fields) * 100)
+            completion_rate = int(((total_fields - len(missing_info_fields)) / total_fields) * 100)
+        else:
+            quality_score = 0
+            completion_rate = 0
         
-        # Markdown形式のレポートを生成
-        report = "## ⚠️ 懸念点レポート\n\n"
+        # レポートが不要な場合（すべて問題なし）
+        concerns_exist = (missing_info_fields or uncertain_fields or 
+                         length_exceeded_fields or truncated_fields)
+        
+        # 常に品質サマリーは表示
+        report = "## 📊 ドラフト品質レポート\n\n"
+        
+        # 品質スコアの表示
+        if quality_score >= 80:
+            score_emoji = "🟢"
+            score_label = "優良"
+        elif quality_score >= 60:
+            score_emoji = "🟡"
+            score_label = "標準"
+        else:
+            score_emoji = "🔴"
+            score_label = "要改善"
+        
+        report += f"**品質スコア**: {score_emoji} **{quality_score}点** ({score_label})\n"
+        report += f"**完成度**: {completion_rate}% ({total_fields - len(missing_info_fields)}/{total_fields}項目入力済み)\n"
+        
+        if retry_total > 0:
+            report += f"**自動修正**: {retry_total}回の文字数制限超過を自動修正しました\n"
+        
+        report += "\n"
+        
+        # 懸念点がない場合
+        if not concerns_exist:
+            report += "> ✅ すべての項目が正常に入力されました。内容をご確認ください。\n"
+            return report
+        
+        # 懸念点がある場合
+        report += "### ⚠️ 懸念点\n\n"
+        
+        if length_exceeded_fields:
+            report += "#### 📏 文字数制限を超過した項目\n"
+            for item in length_exceeded_fields:
+                report += f"- **{item['field_name']}**: {item['reason']}\n"
+            report += "\n"
+        
+        if truncated_fields:
+            report += "#### ✂️ 省略記号で終わっている項目\n"
+            for item in truncated_fields:
+                report += f"- **{item['field_name']}**: {item['reason']}\n"
+            report += "\n"
         
         if missing_info_fields:
-            report += "### 📋 情報不足で埋められなかった項目\n"
+            report += "#### 📋 情報不足で埋められなかった項目\n"
             for item in missing_info_fields:
                 report += f"- **{item['field_name']}**: {item['reason']}\n"
             report += "\n"
         
         if uncertain_fields:
-            report += "### ❓ 確認が必要な項目\n"
+            report += "#### ❓ 確認が必要な項目\n"
             for item in uncertain_fields:
                 report += f"- **{item['field_name']}**: {item['reason']}\n"
             report += "\n"
@@ -1817,3 +1948,4 @@ JSONのみを出力してください。
         report += "> 💡 上記の項目については、ドラフトを確認し必要に応じて修正してください。\n"
         
         return report
+

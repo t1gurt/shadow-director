@@ -20,6 +20,10 @@ class ProgressStage(Enum):
     COMPLETED = "✨"
     WARNING = "⚠️"
     ERROR = "❌"
+    # 脳内開示・リカバリー演出用ステージ
+    THINKING = "🧠"      # Agent Thought表示
+    OBSTACLE = "⚠️"      # 障害検知
+    RECOVERY = "🔄"      # リカバリー演出
 
 
 @dataclass
@@ -133,6 +137,38 @@ class ProgressNotifier:
     def clear(self) -> None:
         """Clear all stored updates."""
         self.updates.clear()
+    
+    def notify_thought(self, title: str, reasoning: str) -> None:
+        """
+        Agent Thought専用通知。AIの思考プロセスを「独り言」形式で表示。
+        
+        Args:
+            title: 思考のタイトル（例: "ドメイン解析完了"）
+            reasoning: 判断の根拠（例: "政府ドメイン(.go.jp)のため信頼性は最高ランク"）
+        """
+        # 「」で囲んで独り言風に
+        formatted_reasoning = f"「{reasoning}」" if reasoning else ""
+        self.notify_sync(ProgressStage.THINKING, f"Agent Thought: {title}", formatted_reasoning)
+    
+    def notify_obstacle(self, obstacle_type: str, description: str) -> None:
+        """
+        障害検知専用通知。ログイン壁、404、アクセス拒否などを検出時に表示。
+        
+        Args:
+            obstacle_type: 障害の種類（例: "ログイン壁", "ページ未発見"）
+            description: 詳細説明（例: "ページタイトルが 'Sign in' です"）
+        """
+        self.notify_sync(ProgressStage.OBSTACLE, f"障害検知: {obstacle_type}", description)
+    
+    def notify_recovery(self, action: str, target: str = None) -> None:
+        """
+        リカバリー演出専用通知。代替ルート探索などを表示。
+        
+        Args:
+            action: 実行中のアクション（例: "再検索を実行中..."）
+            target: 対象（例: "公式プレスリリースを検索"）
+        """
+        self.notify_sync(ProgressStage.RECOVERY, action, target)
 
 
 # Global instance for use across modules
