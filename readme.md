@@ -116,9 +116,9 @@ graph TD
     
     subgraph "Storage (GCS)"
         GCS[(Cloud Storage)]
-        Interviewer <-->|Profiles| GCS
-        Observer <-->|Reports| GCS
-        Drafter <-->|Drafts| GCS
+        Interviewer <-->|"profiles/{user_id}"| GCS
+        Observer <-->|"reports/{user_id}"| GCS
+        Drafter <-->|"drafts/{user_id}"| GCS
     end
     
     Orchestrator -->|Response| Discord
@@ -316,6 +316,9 @@ gcloud run deploy shadow-director-bot \
 This project is built for Zenn Agentic AI Hackathon 2025.
 
 ---
+
+### Latest Updates (v1.9.2)
+- 🐛 **ドキュメント修正**: READMEのMermaid構文エラーを修正（GCSパスの表記）
 
 ### Latest Updates (v1.9.1)
 - 📋 **プロジェクト状態同期**: READMEとバージョン情報を最新化
