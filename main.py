@@ -792,6 +792,40 @@ async def on_message(message):
             on_message.processing.remove(message.id)
             logging.info(f"[DEDUP] Cleaned up message {message.id} from processing set")
 
+async def run_discord_with_retry(max_retries: int = 5):
+    """
+    Discord クライアントを接続リトライ付きで実行する。
+    Cloud Run でのネットワーク一時的問題に対応するため、
+    接続失敗時は指数バックオフでリトライする。
+    
+    Args:
+        max_retries: 最大リトライ回数（デフォルト: 5）
+    """
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            logging.info(f"Starting Discord Client... (attempt {retry_count + 1}/{max_retries})")
+            await client.start(TOKEN)
+            # If client.start() returns normally, it means the connection was closed gracefully
+            logging.info("Discord client disconnected gracefully.")
+            break
+        except asyncio.TimeoutError as e:
+            retry_count += 1
+            wait_time = min(30 * retry_count, 120)  # 30秒, 60秒, 90秒, 120秒, 120秒
+            logging.error(f"Discord connection timeout ({retry_count}/{max_retries}): {e}")
+            if retry_count < max_retries:
+                logging.info(f"Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+            else:
+                logging.critical("Max retries reached for timeout errors. Exiting...")
+                raise
+        except Exception as e:
+            # For other exceptions, log and re-raise immediately
+            logging.critical(f"Discord Client crash: {e}")
+            raise
+
+
 def main():
     global orchestrator
     
@@ -814,14 +848,13 @@ def main():
             logging.critical(f"Failed to initialize Orchestrator: {e}")
             # Do NOT exit. Container keeps running.
         
-        # 3. Run Discord Client (Blocking)
+        # 3. Run Discord Client with retry logic
         try:
-            logging.info("Starting Discord Client...")
-            client.run(TOKEN)
+            asyncio.run(run_discord_with_retry())
         except Exception as e:
-            logging.critical(f"Discord Client crash: {e}")
-            # If client crashes, we exit main, daemon thread dies, container dies.
-            # This is correct behavior for a bot crash.
+            logging.critical(f"Discord Client failed after retries: {e}")
+            # If client crashes after all retries, we exit main, daemon thread dies, container dies.
+            # Cloud Run will restart the container.
 
 if __name__ == "__main__":
     main()

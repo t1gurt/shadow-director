@@ -162,13 +162,22 @@ class GrantFinder:
 クエリが示唆する戦略を使用してください。
 見つかった上位3つの機会について報告してください。
 """
+        
+        # 日本語で思考するよう指示を追加（Thinking Outputが日本語になる）
+        full_prompt = "**重要: あなたの内部思考・推論プロセスはすべて日本語で行ってください。**\n\n" + full_prompt
 
         try:
             # Enable Google Search Tool
             tool_config = self.search_tool.get_tool_config()
             
-            # Gemini 3.0 Thinking Mode for grant discovery
-            thinking_config = ThinkingConfig(thinking_level="high")
+            # Gemini 3.0 Thinking Mode for grant discovery with thought output
+            thinking_config = ThinkingConfig(
+                thinking_level="high",
+                include_thoughts=True  # 思考プロセスを取得
+            )
+            
+            notifier = get_progress_notifier()
+            notifier.notify_sync(ProgressStage.SEARCHING, "助成金候補を検索中...", "Gemini 3.0 Thinking Modeで深層推論を実行")
             
             response = self.client.models.generate_content(
                 model=self.model_name,
@@ -178,7 +187,37 @@ class GrantFinder:
                     thinking_config=thinking_config
                 )
             )
-            response_text = response.text if response.text else ""
+            
+            response_text = ""
+            thinking_text = ""
+            
+            # レスポンスからthinking partとtext partを分離
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'thought') and part.thought:
+                        # Thinking output (モデルの思考プロセス)
+                        thinking_text = part.text if hasattr(part, 'text') else ""
+                    elif hasattr(part, 'text'):
+                        # Final output (最終回答)
+                        response_text = part.text
+            
+            # Fallback: 旧形式のレスポンス対応
+            if not response_text and response.text:
+                response_text = response.text
+            
+            # 思考プロセスをDiscordに通知（要約版）
+            if thinking_text:
+                # 長すぎる場合は要約（最初の500文字 + 最後の200文字）
+                if len(thinking_text) > 800:
+                    thought_summary = thinking_text[:500] + "\n...(省略)...\n" + thinking_text[-200:]
+                else:
+                    thought_summary = thinking_text
+                
+                notifier.notify_thought(
+                    "AIの推論プロセス（生ログ）",
+                    thought_summary
+                )
+                logging.info(f"[GRANT_FINDER] Thinking output ({len(thinking_text)} chars): {thinking_text[:200]}...")
             
             # Validate response_text before parsing
             if not response_text:
@@ -288,11 +327,19 @@ class GrantFinder:
 - **信頼度理由**: [理由]
 """
         
+        # 日本語で思考するよう指示を追加
+        full_prompt = "**重要: あなたの内部思考・推論プロセスはすべて日本語で行ってください。**\n\n" + full_prompt
+        
         try:
             tool_config = self.search_tool.get_tool_config()
             
             # Gemini 3.0 Thinking Mode for deep reasoning during page investigation
-            thinking_config = ThinkingConfig(thinking_level="high")
+            thinking_config = ThinkingConfig(
+                thinking_level="high",
+                include_thoughts=True  # 思考プロセスを取得
+            )
+            
+            notifier = get_progress_notifier()
             
             response = self.client.models.generate_content(
                 model=self.model_name,
@@ -304,7 +351,35 @@ class GrantFinder:
                 )
             )
             
-            response_text = response.text
+            response_text = ""
+            thinking_text = ""
+            
+            # レスポンスからthinking partとtext partを分離
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'thought') and part.thought:
+                        thinking_text = part.text if hasattr(part, 'text') else ""
+                    elif hasattr(part, 'text'):
+                        response_text += part.text
+            
+            # Fallback: 旧形式のレスポンス対応
+            if not response_text and response.text:
+                response_text = response.text
+            
+            # 思考プロセスをDiscordに通知
+            if thinking_text:
+                # 長すぎる場合は要約
+                if len(thinking_text) > 600:
+                    thought_summary = thinking_text[:400] + "\n...(省略)...\n" + thinking_text[-150:]
+                else:
+                    thought_summary = thinking_text
+                
+                notifier.notify_thought(
+                    f"[{grant_display_name}] 公式ページ調査の推論",
+                    thought_summary
+                )
+                logging.info(f"[GRANT_FINDER] Thinking output for {grant_name}: {thinking_text[:200]}...")
+            
             logging.info(f"[GRANT_FINDER] Response: {response_text[:200]}...")
             
             # Parse response
@@ -636,6 +711,8 @@ class GrantFinder:
             site_restriction = " OR ".join([f"site:{d}" for d in self.TRUSTED_DOMAINS])
             
             retry_prompt = f"""
+**重要: あなたの内部思考・推論プロセスはすべて日本語で行ってください。**
+
 助成金の公式申請ページを検索してください。
 
 **検索クエリ（SGNAモデル）:** `"{query}" ({site_restriction})`
@@ -652,7 +729,10 @@ class GrantFinder:
 """
             try:
                 # Gemini 3.0 Thinking Mode for retry search
-                thinking_config = ThinkingConfig(thinking_level="high")
+                thinking_config = ThinkingConfig(
+                    thinking_level="high",
+                    include_thoughts=True
+                )
                 
                 response = self.client.models.generate_content(
                     model=self.model_name,
@@ -663,10 +743,32 @@ class GrantFinder:
                         thinking_config=thinking_config
                     )
                 )
-
-                logging.info(f"[GRANT_FINDER] Retry {retry_num + 1} response: {response.text}")
                 
-                retry_url_match = re.search(r'\*\*公式URL\*\*:\s*(.+)', response.text)
+                response_text = ""
+                thinking_text = ""
+                
+                # レスポンスからthinking partを抽出
+                if response.candidates and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if hasattr(part, 'thought') and part.thought:
+                            thinking_text = part.text if hasattr(part, 'text') else ""
+                        elif hasattr(part, 'text'):
+                            response_text += part.text
+                
+                if not response_text and response.text:
+                    response_text = response.text
+                
+                # 思考プロセスをDiscord通知（リカバリー中の推論）
+                if thinking_text:
+                    thought_summary = thinking_text[:300] if len(thinking_text) > 300 else thinking_text
+                    notifier.notify_thought(
+                        f"[{grant_display_name}] リカバリー検索の推論",
+                        thought_summary
+                    )
+
+                logging.info(f"[GRANT_FINDER] Retry {retry_num + 1} response: {response_text}")
+                
+                retry_url_match = re.search(r'\*\*公式URL\*\*:\s*(.+)', response_text)
                 if retry_url_match:
                     retry_url = retry_url_match.group(1).strip()
                     retry_url = self.validator.resolve_redirect_url(retry_url)

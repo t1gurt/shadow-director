@@ -192,7 +192,8 @@ shadow-director/
 │   │   ├── site_explorer.py         # Playwright基盤クラス
 │   │   ├── slide_generator.py       # スライド画像生成（Imagen 3/matplotlib）
 │   │   ├── document_filler.py       # Word/Excel自動入力エンジン
-│   │   └── file_downloader.py       # HTTPファイルダウンローダー
+│   │   ├── file_downloader.py       # HTTPファイルダウンローダー
+│   │   └── url_analyzer.py          # URL解析ユーティリティ
 │   ├── logic/
 │   │   ├── grant_finder.py          # 助成金検索ロジック（SGNAモデル）
 │   │   ├── grant_validator.py       # URL検証・品質評価
@@ -313,6 +314,15 @@ gcloud run deploy shadow-director-bot \
 ## 📝 License
 
 This project is built for Zenn Agentic AI Hackathon 2025.
+
+---
+
+### Latest Updates (v1.9.1)
+- 📋 **プロジェクト状態同期**: READMEとバージョン情報を最新化
+- 🔧 **ディレクトリ構成更新**: `url_analyzer.py` を tools に追加
+
+### Latest Updates (v1.9.0)
+- ✍️ **テーブル内短文記述改善**: 短い単語、体言止め、コマンド的な表現の制限を緩和
 
 ---
 
