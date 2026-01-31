@@ -4,11 +4,16 @@ Shadow Director Version Information
 """
 
 # バージョン情報
-__version__ = "1.9.2"
+__version__ = "2.0.0"
 __update_date__ = "2026-01-31"
 
 # 最新の追加機能リスト
 LATEST_FEATURES = [
+    # v2.0.0 - AI戦略参謀化
+    "🎯 競合調査・勝率予測（Competitive Intelligence）: 過去採択団体を調査し、戦略提案と勝率予測を生成",
+    "🔄 敵対的評価ループ（Adversarial Critique）: Writer-Criticによる自動推敲（5軸×20点、最大3ラウンド）",
+    "📊 思考プロセス可視化: AI同士の議論ログをDiscordに通知",
+    "🗑️ 事務局長レビュー統合: Critic Agentに一本化（重複機能の削除）",
     # v1.9.2 - README修正
     "READMEのMermaid構文エラーを修正（GCSパスの表記修正）",
     # v1.9.1 - プロジェクト状態同期

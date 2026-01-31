@@ -184,6 +184,7 @@ shadow-director/
 │   │   ├── interviewer.py           # インタビューエージェント (Gemini 3.0 Pro)
 │   │   ├── observer.py              # 監視エージェント (Gemini 3.0 Flash)
 │   │   ├── drafter.py               # ドラフト生成エージェント (Gemini 3.0 Pro)
+│   │   ├── critic.py                # 敵対的評価エージェント (推敲ループ)
 │   │   └── pr_agent.py              # 広報エージェント (SNS投稿生成)
 │   ├── tools/
 │   │   ├── file_processor.py        # PDF/URL処理ユーティリティ
@@ -201,7 +202,8 @@ shadow-director/
 │   │   ├── file_validator.py        # PDF/ZIPファイル検証（SGNAモデル）
 │   │   ├── file_classifier.py       # アップロードファイル分類ロジック
 │   │   ├── visual_analyzer.py       # VLM入力パターン検出（Word/Excel）
-│   │   └── format_field_mapper.py   # フォーマット項目マッピング
+│   │   ├── format_field_mapper.py   # フォーマット項目マッピング
+│   │   └── competitive_analyzer.py  # 競合調査・勝率予測エンジン
 │   ├── memory/
 │   │   ├── profile_manager.py       # プロファイル管理 (GCS/Local)
 │   │   └── memory_bank_storage.py   # Vertex AI Memory Bank 統合
@@ -317,14 +319,14 @@ This project is built for Zenn Agentic AI Hackathon 2025.
 
 ---
 
-### Latest Updates (v1.9.2)
-- 🐛 **ドキュメント修正**: READMEのMermaid構文エラーを修正（GCSパスの表記）
+### Latest Updates (v2.0.0) - AI戦略参謀化
+- 🎯 **競合調査・勝率予測**: 過去採択団体を調査し、戦略提案と勝率予測を生成
+- 🔄 **敵対的評価ループ**: Writer-Criticによる自動推敲（5軸×20点、最大3ラウンド）
+- 📊 **思考プロセス可視化**: AI同士の議論ログをDiscordに通知
+- 🗑️ **機能統合**: 事務局長レビューをCritic Agentに統合
 
-### Latest Updates (v1.9.1)
-- 📋 **プロジェクト状態同期**: READMEとバージョン情報を最新化
-- 🔧 **ディレクトリ構成更新**: `url_analyzer.py` を tools に追加
-
-### Latest Updates (v1.9.0)
+### Latest Updates (v1.9.x)
+- 🐛 **ドキュメント修正**: READMEのMermaid構文エラーを修正
 - ✍️ **テーブル内短文記述改善**: 短い単語、体言止め、コマンド的な表現の制限を緩和
 
 ---
