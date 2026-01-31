@@ -45,6 +45,10 @@ class FormatFieldMapper:
         self.model_name = model_name
         self.logger = logging.getLogger(__name__)
         
+        # フィールド制限の情報を保持
+        self.last_skipped_field_count = 0
+        self.last_total_field_count = 0
+        
         if not self.client:
             try:
                 from src.utils.gemini_client import get_gemini_client
@@ -301,7 +305,7 @@ class FormatFieldMapper:
 
             # テーブルからフィールドを検出
             for table_idx, table in enumerate(doc.tables):
-                table_fields = self._analyze_word_table(table, table_idx)
+                table_fields = self._analyze_word_table(table, table_idx, block_items)
                 fields.extend(table_fields)
             
             # 段落からフィールドを検出（順序情報を渡す）
@@ -584,14 +588,15 @@ class FormatFieldMapper:
         
         return fields
     
-    def _analyze_word_table(self, table, table_idx: int) -> List[FieldInfo]:
+    def _analyze_word_table(self, table, table_idx: int, block_items=None) -> List[FieldInfo]:
         """
         Wordテーブルからフィールドを検出（複数パターン対応）
         
         対応パターン:
-        1. ラベル | 入力欄（空） のペア
-        2. 1行に複数の ラベル | 入力欄 ペアがある場合
-        3. ヘッダー行 + データ行パターン（例：｜項目｜金額｜説明｜）
+        1. 1セル(1行1列)のテーブル（新規対応）
+        2. ラベル | 入力欄（空） のペア
+        3. 1行に複数の ラベル | 入力欄 ペアがある場合
+        4. ヘッダー行 + データ行パターン（例：｜項目｜金額｜説明｜）
         """
         fields = []
         
@@ -599,6 +604,11 @@ class FormatFieldMapper:
             rows = list(table.rows)
             if not rows:
                 return fields
+            
+            # 1セルテーブルの場合は専用ロジック
+            if len(rows) == 1 and len(rows[0].cells) == 1:
+                self.logger.info(f"[FORMAT_MAPPER] Table {table_idx}: detected single-cell table")
+                return self._detect_single_cell_pattern(table, table_idx, block_items)
             
             # まず既存のラベル→入力パターンで検出を試みる
             label_input_fields = self._detect_label_input_pattern(table, table_idx, rows)
@@ -618,6 +628,162 @@ class FormatFieldMapper:
             self.logger.warning(f"[FORMAT_MAPPER] Error analyzing Word table: {e}")
         
         return fields
+    
+    def _detect_single_cell_pattern(self, table, table_idx: int, block_items=None) -> List[FieldInfo]:
+        """
+        1セル(1行1列)のテーブルを検出する。
+        
+        対応パターン:
+        1. 段落ラベル + 1セルテーブル(入力欄)
+           例: <メールアドレス> (段落)
+               ┌────────┐
+               │        │ (1セルテーブル)
+               └────────┘
+        
+        2. 1セル内にラベル + プレースホルダー
+           例: ┌──────────────┐
+               │ ラベル：____ │
+               └──────────────┘
+        
+        Args:
+            table: Wordのテーブルオブジェクト
+            table_idx: テーブルのインデックス
+            block_items: ドキュメント要素の順序リスト（任意）
+        
+        Returns:
+            検出されたフィールドのリスト
+        """
+        fields = []
+        
+        try:
+            cell = table.rows[0].cells[0]
+            cell_text = cell.text.strip()
+            
+            # パターン2: 1セル内にラベル + プレースホルダー
+            # 下線プレースホルダー: "ラベル：_____"
+            # 括弧プレースホルダー: "ラベル：（　）"
+            import re
+            
+            # 下線パターン
+            underline_match = re.search(r'(.+?)[:：]\s*[_＿]{3,}', cell_text)
+            if underline_match:
+                field = FieldInfo(
+                    field_id=f"table{table_idx}_0_0",
+                    field_name=underline_match.group(1).strip(),
+                    field_type="table_cell",
+                    location={
+                        "table_idx": table_idx,
+                        "row": 0,
+                        "col": 0,
+                        "input_pattern": "single_cell_underline"
+                    }
+                )
+                fields.append(field)
+                self.logger.info(f"[FORMAT_MAPPER] Single-cell table {table_idx}: detected underline pattern")
+                return fields
+            
+            # 括弧パターン
+            bracket_match = re.search(r'(.+?)[(（]\s*[　\s]*[)）]', cell_text)
+            if bracket_match:
+                field = FieldInfo(
+                    field_id=f"table{table_idx}_0_0",
+                    field_name=bracket_match.group(1).strip(),
+                    field_type="table_cell",
+                    location={
+                        "table_idx": table_idx,
+                        "row": 0,
+                        "col": 0,
+                        "input_pattern": "single_cell_bracket"
+                    }
+                )
+                fields.append(field)
+                self.logger.info(f"[FORMAT_MAPPER] Single-cell table {table_idx}: detected bracket pattern")
+                return fields
+            
+            # パターン1: 空セルまたはプレースホルダーのみ → 直前の段落がラベル
+            is_empty = not cell_text
+            is_placeholder = cell_text and (
+                all(c in '_＿　 ' for c in cell_text) or
+                cell_text in ['（　）', '(　)', '（）', '()']
+            )
+            
+            if is_empty or is_placeholder:
+                # 直前の段落をラベルとして検索
+                label = self._find_label_before_table(table_idx, block_items)
+                
+                if label:
+                    field = FieldInfo(
+                        field_id=f"table{table_idx}_0_0",
+                        field_name=label,
+                        field_type="table_cell",
+                        location={
+                            "table_idx": table_idx,
+                            "row": 0,
+                            "col": 0,
+                            "input_pattern": "single_cell_with_paragraph_label"
+                        }
+                    )
+                    fields.append(field)
+                    self.logger.info(f"[FORMAT_MAPPER] Single-cell table {table_idx}: detected with paragraph label '{label}'")
+                else:
+                    # ラベルが見つからない場合でも、空の1セルテーブルとして検出
+                    field = FieldInfo(
+                        field_id=f"table{table_idx}_0_0",
+                        field_name=f"テーブル{table_idx}",
+                        field_type="table_cell",
+                        location={
+                            "table_idx": table_idx,
+                            "row": 0,
+                            "col": 0,
+                            "input_pattern": "single_cell_no_label"
+                        }
+                    )
+                    fields.append(field)
+                    self.logger.info(f"[FORMAT_MAPPER] Single-cell table {table_idx}: detected without label")
+        
+        except Exception as e:
+            self.logger.warning(f"[FORMAT_MAPPER] Error detecting single-cell table: {e}")
+        
+        return fields
+    
+    def _find_label_before_table(self, table_idx: int, block_items=None) -> Optional[str]:
+        """
+        テーブルの直前の段落からラベルを取得する。
+        
+        Args:
+            table_idx: テーブルのインデックス
+            block_items: ドキュメント要素の順序リスト
+        
+        Returns:
+            ラベル文字列、見つからない場合はNone
+        """
+        if not block_items:
+            return None
+        
+        try:
+            # block_items内のテーブル要素を探す
+            for idx, item in enumerate(block_items):
+                if item["type"] == "table" and item["index"] == table_idx:
+                    # 直前の要素を確認
+                    if idx > 0:
+                        prev_item = block_items[idx - 1]
+                        if prev_item["type"] == "paragraph":
+                            # 段落のテキストを取得
+                            para_text = prev_item["obj"].text.strip()
+                            
+                            # ラベルとして適切か判定（短く、特定のパターンに一致）
+                            # 例: "<メールアドレス>", "団体名：", "1. 団体登録ID"
+                            if para_text and len(para_text) < 100:
+                                # 末尾のコロンや記号を除去
+                                import re
+                                label = re.sub(r'[:：]+\s*$', '', para_text)
+                                # 番号付きラベルの場合、番号を含める
+                                return label
+            
+        except Exception as e:
+            self.logger.warning(f"[FORMAT_MAPPER] Error finding label before table: {e}")
+        
+        return None
     
     def _detect_label_input_pattern(self, table, table_idx: int, rows) -> List[FieldInfo]:
         """ラベル→入力欄のペアパターンを検出"""
@@ -1178,6 +1344,112 @@ JSONのみを出力してください。
         
         return "unknown"
     
+    def _calculate_field_importance(self, field: FieldInfo, field_index: int = 0) -> int:
+        """
+        フィールドの重要度をスコアリングする。
+        
+        Args:
+            field: 評価対象のフィールド
+            field_index: フィールドの順序（0から始まる）
+            
+        Returns:
+            重要度スコア（高いほど重要）
+        """
+        score = 0
+        field_name_lower = field.field_name.lower()
+        
+        # 1. 必須フラグ: +50点
+        if field.required:
+            score += 50
+        
+        # 2. キーワードマッチング
+        # 最優先キーワード: +30点
+        high_priority_keywords = ['団体名', '法人名', '代表者', '連絡先', '電話', 'tel', 'email', 'メールアドレス', '住所']
+        for kw in high_priority_keywords:
+            if kw in field_name_lower:
+                score += 30
+                break
+        
+        # 重要キーワード: +20点
+        important_keywords = ['事業名', '目的', '概要', 'プロジェクト', '計画', '活動', '取り組み']
+        for kw in important_keywords:
+            if kw in field_name_lower:
+                score += 20
+                break
+        
+        # 金額関連: +15点
+        amount_keywords = ['金額', '予算', '費用', 'cost', '円']
+        for kw in amount_keywords:
+            if kw in field_name_lower:
+                score += 15
+                break
+        
+        # 3. フィールドタイプ
+        # 長文フィールド（詳細な記述が必要）: +10点
+        if field.input_length_type == "long":
+            score += 10
+        # 短文フィールド: +5点
+        elif field.input_length_type == "short":
+            score += 5
+        
+        # 4. 位置による加点（最初の方のフィールド）
+        # 先頭から30フィールド以内: 位置に応じて最大+5点
+        if field_index < 30:
+            score += max(5 - (field_index // 6), 0)
+        
+        # 5. 文字数制限がある場合: +3点（正式な制限があるフィールドは重要度が高い）
+        if field.max_length and field.max_length > 0:
+            score += 3
+        
+        return score
+    
+    def _limit_fields_by_importance(self, fields: List[FieldInfo], max_fields: int = 50) -> Tuple[List[FieldInfo], int]:
+        """
+        フィールドを重要度順にソートし、上限数に制限する。
+        
+        Args:
+            fields: フィールドのリスト
+            max_fields: 最大フィールド数（デフォルト: 50）
+            
+        Returns:
+            (制限後のフィールドリスト, 元のフィールド数)
+        """
+        original_count = len(fields)
+        
+        # フィールド数が上限以下の場合はそのまま返す
+        if original_count <= max_fields:
+            self.logger.info(f"[FORMAT_MAPPER] Field count ({original_count}) is within limit ({max_fields})")
+            return fields, original_count
+        
+        # 重要度スコアを計算
+        field_scores = []
+        for idx, field in enumerate(fields):
+            score = self._calculate_field_importance(field, idx)
+            field_scores.append((field, score))
+            self.logger.debug(f"[FORMAT_MAPPER] Field '{field.field_name}' (ID: {field.field_id}): importance score = {score}")
+        
+        # スコアでソート（降順）
+        field_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # 上位max_fieldsフィールドを選択
+        selected_fields = [field for field, score in field_scores[:max_fields]]
+        
+        # ログ出力
+        self.logger.warning(
+            f"[FORMAT_MAPPER] Field limit applied: {original_count} fields found, "
+            f"limited to top {max_fields} by importance. "
+            f"Skipped {original_count - max_fields} fields."
+        )
+        
+        # スキップされたフィールドの例を出力（デバッグ用）
+        skipped_fields = [field for field, score in field_scores[max_fields:max_fields+5]]
+        if skipped_fields:
+            skipped_names = [f.field_name for f in skipped_fields]
+            self.logger.info(f"[FORMAT_MAPPER] Examples of skipped fields: {', '.join(skipped_names[:5])}")
+        
+        return selected_fields, original_count
+
+    
     def map_draft_to_fields(
         self, 
         fields: List[FieldInfo], 
@@ -1209,10 +1481,18 @@ JSONのみを出力してください。
             return {}
         
         try:
+            # フィールド数制限（大量の項目がある場合は重要度順に選択）
+            limited_fields, original_count = self._limit_fields_by_importance(fields, max_fields=50)
+            skipped_count = original_count - len(limited_fields)
+            
+            # 制限情報を保存（drafter側で参照可能にする）
+            self.last_total_field_count = original_count
+            self.last_skipped_field_count = skipped_count
+            
             # フィールド情報をプロンプト用にフォーマット
             fields_prompt = "\n".join([
                 f"- field_id: {f.field_id}\n  名前: {f.field_name}\n  説明: {f.description or '不明'}\n  文字数制限: {f.max_length or '制限なし'}\n  入力タイプ: {f.input_length_type}"
-                for f in fields
+                for f in limited_fields
             ])
             
             prompt = f"""
@@ -1427,13 +1707,68 @@ JSONのみを出力してください。
                     value = re.sub(r'\s*\[UNCERTAIN:[^\]]+\]', '', value).strip()
                     self.logger.info(f"[FORMAT_MAPPER] Field {field.field_name} is uncertain: {concern_reason}")
                 
-                # 文字数制限チェック & 省略記号検知
-                if field.max_length and len(value) > field.max_length:
-                    self.logger.warning(f"[FORMAT_MAPPER] Field {field.field_id} exceeded max length ({len(value)} > {field.max_length}). Value: {value[:20]}...")
+                # 文字数制限チェック & 自動リトライ
+                max_retries = 2
+                retry_count = 0
+                original_value = value
                 
+                while field.max_length and len(value) > field.max_length and retry_count < max_retries:
+                    retry_count += 1
+                    overflow_chars = len(value) - field.max_length
+                    self.logger.warning(
+                        f"[FORMAT_MAPPER] Field {field.field_id} exceeded max length "
+                        f"({len(value)} > {field.max_length}, over by {overflow_chars}). Retry {retry_count}/{max_retries}"
+                    )
+                    
+                    # 短縮リトライプロンプト
+                    retry_prompt = f"""前回の回答が{field.max_length}字の制限を{overflow_chars}字オーバーしました。
+以下の回答を**必ず{field.max_length}字以内**に短縮してください。
+
+# 短縮対象の回答
+{value}
+
+# 短縮の指示
+1. 制限の90%である{int(field.max_length * 0.9)}字程度を目標にしてください
+2. 重要な情報を残しつつ、冗長な表現を削除してください
+3. 体言止めや簡潔な表現を活用してください
+4. 「...」「…」での省略は禁止です
+5. 短縮後の文章のみを出力してください
+
+# 短縮後の回答:"""
+
+                    try:
+                        retry_response = self.client.models.generate_content(
+                            model=flash_model,
+                            contents=retry_prompt
+                        )
+                        value = retry_response.text.strip()
+                        self.logger.info(
+                            f"[FORMAT_MAPPER] Retry {retry_count}: shortened to {len(value)} chars "
+                            f"(limit: {field.max_length})"
+                        )
+                    except Exception as retry_error:
+                        self.logger.error(f"[FORMAT_MAPPER] Retry failed: {retry_error}")
+                        break
+                
+                # 最終的な文字数超過チェック
+                if field.max_length and len(value) > field.max_length:
+                    overflow_chars = len(value) - field.max_length
+                    overflow_percentage = (overflow_chars / field.max_length) * 100
+                    self.logger.warning(
+                        f"[FORMAT_MAPPER] Field {field.field_id} still exceeds limit after retries "
+                        f"({len(value)} > {field.max_length}, {overflow_percentage:.1f}% over)"
+                    )
+                    # 懸念点として記録（既存の懸念がなければ）
+                    if concern_type == "none":
+                        concern_type = "length_exceeded"
+                        concern_reason = f"{field.max_length}字制限を{overflow_chars}字超過（{overflow_percentage:.1f}%オーバー）"
+                
+                # 省略記号検知
                 if value.endswith("...") or value.endswith("…"):
-                     self.logger.warning(f"[FORMAT_MAPPER] Field {field.field_id} ends with ellipsis. VLM failed to summarize properly.")
-                     # ここではあえて削除せず、ユーザーに修正を促す（または自動再生成ロジックを入れる余地あり）
+                    self.logger.warning(f"[FORMAT_MAPPER] Field {field.field_id} ends with ellipsis")
+                    if concern_type == "none":
+                        concern_type = "truncated"
+                        concern_reason = "回答が省略記号で終わっています。手動で修正が必要です。"
                 
                 # 結果を格納（懸念点情報を含む）
                 result[field.field_id] = {
@@ -1444,7 +1779,10 @@ JSONのみを出力してください。
                     "location": field.location,
                     "input_length_type": field.input_length_type,
                     "concern_type": concern_type,
-                    "concern_reason": concern_reason
+                    "concern_reason": concern_reason,
+                    "max_length": field.max_length,
+                    "actual_length": len(value),
+                    "retry_count": retry_count
                 }
                 
                 self.logger.info(f"[FORMAT_MAPPER] Successfully filled field: {field.field_name} ({len(value)} chars, concern: {concern_type})")
@@ -1488,23 +1826,37 @@ JSONのみを出力してください。
     
     def generate_concern_report(self, field_values: Dict[str, Any]) -> str:
         """
-        入力結果から懸念点レポートを生成する。
+        入力結果から懸念点レポートを生成する（強化版）。
         
         Args:
             field_values: fill_fields_individuallyの戻り値
             
         Returns:
-            Markdown形式のレポート
+            Markdown形式のレポート（品質スコア付き）
         """
         missing_info_fields = []
         uncertain_fields = []
+        length_exceeded_fields = []
+        truncated_fields = []
+        
+        # 品質スコア計算用
+        total_fields = len(field_values)
+        good_fields = 0
+        retry_total = 0
         
         for field_id, data in field_values.items():
             concern_type = data.get("concern_type", "none")
             concern_reason = data.get("concern_reason", "")
             field_name = data.get("field_name", field_id)
+            retry_count = data.get("retry_count", 0)
+            max_length = data.get("max_length")
+            actual_length = data.get("actual_length", 0)
             
-            if concern_type == "missing_info":
+            retry_total += retry_count
+            
+            if concern_type == "none":
+                good_fields += 1
+            elif concern_type == "missing_info":
                 missing_info_fields.append({
                     "field_name": field_name,
                     "reason": concern_reason
@@ -1514,22 +1866,81 @@ JSONのみを出力してください。
                     "field_name": field_name,
                     "reason": concern_reason
                 })
+            elif concern_type == "length_exceeded":
+                length_exceeded_fields.append({
+                    "field_name": field_name,
+                    "reason": concern_reason,
+                    "max_length": max_length,
+                    "actual_length": actual_length
+                })
+            elif concern_type == "truncated":
+                truncated_fields.append({
+                    "field_name": field_name,
+                    "reason": concern_reason
+                })
         
-        # レポートが不要な場合
-        if not missing_info_fields and not uncertain_fields:
-            return ""
+        # 品質スコアを計算（0-100）
+        if total_fields > 0:
+            quality_score = int((good_fields / total_fields) * 100)
+            completion_rate = int(((total_fields - len(missing_info_fields)) / total_fields) * 100)
+        else:
+            quality_score = 0
+            completion_rate = 0
         
-        # Markdown形式のレポートを生成
-        report = "## ⚠️ 懸念点レポート\n\n"
+        # レポートが不要な場合（すべて問題なし）
+        concerns_exist = (missing_info_fields or uncertain_fields or 
+                         length_exceeded_fields or truncated_fields)
+        
+        # 常に品質サマリーは表示
+        report = "## 📊 ドラフト品質レポート\n\n"
+        
+        # 品質スコアの表示
+        if quality_score >= 80:
+            score_emoji = "🟢"
+            score_label = "優良"
+        elif quality_score >= 60:
+            score_emoji = "🟡"
+            score_label = "標準"
+        else:
+            score_emoji = "🔴"
+            score_label = "要改善"
+        
+        report += f"**品質スコア**: {score_emoji} **{quality_score}点** ({score_label})\n"
+        report += f"**完成度**: {completion_rate}% ({total_fields - len(missing_info_fields)}/{total_fields}項目入力済み)\n"
+        
+        if retry_total > 0:
+            report += f"**自動修正**: {retry_total}回の文字数制限超過を自動修正しました\n"
+        
+        report += "\n"
+        
+        # 懸念点がない場合
+        if not concerns_exist:
+            report += "> ✅ すべての項目が正常に入力されました。内容をご確認ください。\n"
+            return report
+        
+        # 懸念点がある場合
+        report += "### ⚠️ 懸念点\n\n"
+        
+        if length_exceeded_fields:
+            report += "#### 📏 文字数制限を超過した項目\n"
+            for item in length_exceeded_fields:
+                report += f"- **{item['field_name']}**: {item['reason']}\n"
+            report += "\n"
+        
+        if truncated_fields:
+            report += "#### ✂️ 省略記号で終わっている項目\n"
+            for item in truncated_fields:
+                report += f"- **{item['field_name']}**: {item['reason']}\n"
+            report += "\n"
         
         if missing_info_fields:
-            report += "### 📋 情報不足で埋められなかった項目\n"
+            report += "#### 📋 情報不足で埋められなかった項目\n"
             for item in missing_info_fields:
                 report += f"- **{item['field_name']}**: {item['reason']}\n"
             report += "\n"
         
         if uncertain_fields:
-            report += "### ❓ 確認が必要な項目\n"
+            report += "#### ❓ 確認が必要な項目\n"
             for item in uncertain_fields:
                 report += f"- **{item['field_name']}**: {item['reason']}\n"
             report += "\n"
@@ -1537,3 +1948,4 @@ JSONのみを出力してください。
         report += "> 💡 上記の項目については、ドラフトを確認し必要に応じて修正してください。\n"
         
         return report
+

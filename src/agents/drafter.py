@@ -940,6 +940,13 @@ class DrafterAgent:
                         
                         logging.info(f"[DRAFTER] Found {len(fields)} fields in {file_name_orig}")
                         
+                        # Check if field limit was applied and notify user
+                        if hasattr(self.format_mapper, 'last_skipped_field_count') and self.format_mapper.last_skipped_field_count > 0:
+                            skipped = self.format_mapper.last_skipped_field_count
+                            total = self.format_mapper.last_total_field_count
+                            logging.warning(f"[DRAFTER] Field limit applied: {total} fields found, limited to 50")
+                            message += f"\n\n⚠️ 申請書の項目数が多いため（{total}項目）、重要度の高い50項目に絞って入力します。\nスキップされた{skipped}項目は手動で入力してください。"
+                        
                         # Fill fields individually using profile (field-by-field processing)
                         # Note: No Discord notification per field - progress is logged only
                         field_values = self.format_mapper.fill_fields_individually(
@@ -1146,7 +1153,7 @@ class DrafterAgent:
         profile: str
     ) -> str:
         """
-        事務局長の観点からドラフトをレビューし、コメントを生成する。
+        事務局長の観点からドラフトをレビューし、詳細なコメントを生成する（強化版）。
         
         Args:
             grant_name: 助成金名
@@ -1154,41 +1161,86 @@ class DrafterAgent:
             profile: NPOプロファイル
             
         Returns:
-            Markdown形式の事務局長レビュー
+            Markdown形式の事務局長レビュー（採択可能性評価付き）
         """
         if not self.client or not field_values:
             return ""
         
         try:
-            # フィールド値をテキスト化
-            fields_text = "\n".join([
-                f"- **{data.get('field_name', fid)}**: {data.get('value', '')[:200]}..."
-                if len(data.get('value', '')) > 200
-                else f"- **{data.get('field_name', fid)}**: {data.get('value', '')}"
-                for fid, data in field_values.items()
-                if data.get('value')
-            ])
+            # フィールド値をテキスト化（懸念点情報も含む）
+            fields_with_concerns = []
+            concern_count = 0
             
-            prompt = f"""あなたはNPOの事務局長として、助成金申請書のドラフトをレビューしてください。
+            for fid, data in field_values.items():
+                if not data.get('value'):
+                    continue
+                    
+                field_name = data.get('field_name', fid)
+                value = data.get('value', '')[:300]
+                concern = data.get('concern_type', 'none')
+                
+                if concern != 'none':
+                    concern_count += 1
+                    fields_with_concerns.append(
+                        f"- **{field_name}**: {value}... [⚠️ {concern}]"
+                    )
+                else:
+                    fields_with_concerns.append(
+                        f"- **{field_name}**: {value}..." if len(data.get('value', '')) > 300
+                        else f"- **{field_name}**: {value}"
+                    )
+            
+            fields_text = "\n".join(fields_with_concerns[:30])  # 最大30項目
+            
+            prompt = f"""あなたは20年以上のNPO運営経験を持つ事務局長です。
+助成金申請書のドラフトを、審査員の視点も踏まえて厳しくレビューしてください。
 
 # 対象助成金
 {grant_name}
 
 # NPOプロファイル概要
-{profile[:2000]}
+{profile[:2500]}
 
-# 入力されたドラフト内容
-{fields_text[:4000]}
+# 入力されたドラフト内容（{len(field_values)}項目、うち{concern_count}項目に懸念あり）
+{fields_text}
 
-# レビュー観点
-1. **全体評価**: 申請書全体としての完成度を評価してください
-2. **強み**: この申請書の良い点を挙げてください
-3. **改善提案**: より説得力を高めるための具体的な改善提案をしてください
-4. **確認事項**: 提出前に団体内で確認すべき事項を挙げてください
+# レビュー観点（5つの観点で評価）
+
+## 1. 採択可能性の評価
+この申請書が採択される可能性を「高」「中」「低」で評価し、その理由を述べてください。
+
+## 2. 申請書の説得力
+- 団体の強みが伝わっているか
+- 事業の社会的意義が明確か
+- 数値目標や具体性があるか
+
+## 3. 改善すべき具体的な箇所
+最も改善が必要な2-3箇所を具体的に指摘し、どう修正すべきか提案してください。
+
+## 4. 審査員が気にするポイント
+審査員が質問しそうな点、追加情報が必要な点を挙げてください。
+
+## 5. 提出前の確認事項
+団体内で最終確認すべき事項をリストアップしてください。
 
 # 出力形式
-事務局長としての簡潔なコメント（300字程度）を出力してください。
-箇条書きではなく、自然な文章で記述してください。
+以下の形式でMarkdownで出力してください（合計400-500字程度）:
+
+**採択可能性**: [高/中/低] - [一言理由]
+
+[総評コメント（2-3文で申請書全体の印象）]
+
+**👍 良い点**
+- [ポイント1]
+- [ポイント2]
+
+**⚡ 要改善**
+- [具体的な指摘と改善案1]
+- [具体的な指摘と改善案2]
+
+**✅ 提出前チェック**
+- [確認事項1]
+- [確認事項2]
 """
             
             response = self.client.models.generate_content(

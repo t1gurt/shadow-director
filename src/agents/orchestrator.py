@@ -439,6 +439,20 @@ class Orchestrator:
             if content:
                 # Success: send minimal message with attachment marker
                 response += f"✅ ドラフト作成完了\n📄 マークダウン形式のドラフトも送信します...\n[ATTACHMENT_NEEDED:{user_id}:{filename}]"
+                
+                # Add quality report and director review from drafter message
+                # Extract report sections from message (they start with ## markers)
+                import re
+                report_match = re.search(r'(## 📊 ドラフト品質レポート[\s\S]*?)(?=\n## 📝|\Z)', message)
+                review_match = re.search(r'(## 📝 事務局長レビュー[\s\S]*)', message)
+                
+                if report_match or review_match:
+                    response += "\n\n---\n"
+                    if report_match:
+                        response += f"\n{report_match.group(1).strip()}\n"
+                    if review_match:
+                        response += f"\n{review_match.group(1).strip()}\n"
+                
                 return response
             else:
                 # Error occurred
@@ -505,22 +519,23 @@ class Orchestrator:
             return self.pr_agent.search_related_info(user_id, user_message)
         
         # Default to Interviewer
-        # If attachments exist, use interviewer's file processing
+        # Note: route_message is synchronous and may be called from asyncio.to_thread()
+        # We cannot use async file processing here, so we inform the user about attachments
+        # The actual file processing should be handled asyncio in main.py before calling route_message
         if attachments and len(attachments) > 0:
-            # For interview intent with attachments, use the file processing method
-            import asyncio
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're in async context, but interviewer method is async
-                # This is a sync method, so we need to handle this carefully
-                # For now, just pass text and note that files were attached
-                interviewer_response = self.interviewer.process_message(
-                    user_message + f"\n\n(添付ファイル: {len(attachments)}件を含む)", 
-                    user_id, 
-                    **kwargs
-                )
-            else:
-                interviewer_response = self.interviewer.process_message(user_message, user_id, **kwargs)
+            # Add attachment info to the message
+            attachment_info = f"\n\n📎 添付ファイル {len(attachments)}件:\n"
+            for att in attachments:
+                # Get basic info from Discord attachment object
+                filename = getattr(att, 'filename', 'unknown')
+                size = getattr(att, 'size', 0)
+                attachment_info += f"  • {filename} ({size} bytes)\n"
+            
+            interviewer_response = self.interviewer.process_message(
+                user_message + attachment_info, 
+                user_id, 
+                **kwargs
+            )
         else:
             interviewer_response = self.interviewer.process_message(user_message, user_id, **kwargs)
         
@@ -711,7 +726,12 @@ class Orchestrator:
             # Add format file markers
             if format_files:
                 grant_result += "📎 申請フォーマットファイル:\n"
-                for file_path, file_name in format_files:
+                for file_tuple in format_files:
+                    # Handle both 2-element (file_path, file_name) and 3-element (file_path, file_name, file_type) tuples
+                    if len(file_tuple) == 3:
+                        file_path, file_name, _ = file_tuple
+                    else:
+                        file_path, file_name = file_tuple
                     grant_result += f"[FORMAT_FILE_NEEDED:{user_id}:{file_path}]\n"
             
             # Step 2: Create draft
@@ -763,6 +783,18 @@ URL: {grant_url}
                 
                 if content:
                     grant_result += f"✅ ドラフト作成完了\n[ATTACHMENT_NEEDED:{user_id}:{filename}]\n"
+                    
+                    # Add quality report and director review from drafter message
+                    import re
+                    report_match = re.search(r'(## 📊 ドラフト品質レポート[\s\S]*?)(?=\n## 📝|\Z)', message)
+                    review_match = re.search(r'(## 📝 事務局長レビュー[\s\S]*)', message)
+                    
+                    if report_match or review_match:
+                        grant_result += "\n---\n"
+                        if report_match:
+                            grant_result += f"\n{report_match.group(1).strip()}\n"
+                        if review_match:
+                            grant_result += f"\n{review_match.group(1).strip()}\n"
                 else:
                     grant_result += f"⚠️ ドラフト作成エラー: {message}\n"
             except Exception as e:

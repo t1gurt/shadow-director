@@ -4,6 +4,7 @@ import os
 import re
 from src.memory.profile_manager import ProfileManager
 from src.tools.file_processor import FileProcessor
+from src.tools.url_analyzer import URLAnalyzer
 
 class InterviewerAgent:
     def __init__(self, profile_manager: Optional[ProfileManager] = None):
@@ -27,6 +28,9 @@ class InterviewerAgent:
         
         # Initialize File Processor
         self.file_processor = FileProcessor(self.client) if self.client else None
+        
+        # Initialize URL Analyzer
+        self.url_analyzer = URLAnalyzer()
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -148,12 +152,26 @@ class InterviewerAgent:
                 pm.add_to_history("agent", error_response)
                 return error_response
         
+        # Analyze URLs if any
+        url_analysis_results = []
+        if urls:
+            print(f"[DEBUG] Analyzing {len(urls)} URLs...")
+            try:
+                url_analysis_results = await self.url_analyzer.analyze_urls(urls)
+                for result in url_analysis_results:
+                    if result.get('success'):
+                        print(f"[DEBUG]   ✓ {result['title'][:50]}...")
+                    else:
+                        print(f"[DEBUG]   ✗ {result['url']}: {result.get('error')}")
+            except Exception as e:
+                print(f"[ERROR] URL analysis error: {e}")
+        
         # If no files/URLs, just do normal interview
-        if not uploaded_files and not urls:
+        if not uploaded_files and not url_analysis_results:
             print(f"[DEBUG] No files or URLs detected, proceeding with normal interview")
             return self.process_message(user_message, user_id, turn_count)
         
-        print(f"[DEBUG] Starting document analysis - {len(uploaded_files)} files, {len(urls)} URLs")
+        print(f"[DEBUG] Starting document analysis - {len(uploaded_files)} files, {len(url_analysis_results)} URLs")
         
         # Build analysis prompt
         analysis_parts = []
@@ -177,8 +195,18 @@ class InterviewerAgent:
 【資料】
 """
         
-        if urls:
-            instruction += f"\n📎 URL: {', '.join(urls)}\n"
+        # Add URL analysis results
+        if url_analysis_results:
+            instruction += "\n📎 URLから取得した情報:\n"
+            for result in url_analysis_results:
+                if result.get('success'):
+                    instruction += f"\n[{result['title']}]\n"
+                    instruction += f"URL: {result['url']}\n"
+                    if result.get('description'):
+                        instruction += f"説明: {result['description']}\n"
+                    instruction += f"内容: {result['content_summary']}\n"
+                else:
+                    instruction += f"\n[エラー] {result['url']}: {result.get('error')}\n"
         
         if uploaded_files:
             instruction += f"\n📄 添付ファイル: {len(uploaded_files)}件\n"

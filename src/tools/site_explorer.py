@@ -75,10 +75,20 @@ class SiteExplorer:
                     # Suppress D-Bus errors in containerized environments
                     '--disable-features=AudioServiceOutOfProcess',
                     '--disable-dbus',
+                    # Additional memory optimizations for slow startup
+                    '--disable-web-security',  # Reduce security checks for faster startup
+                    '--disable-features=IsolateOrigins,site-per-process',  # Reduce process overhead
+                    '--single-process',  # Use single process mode to reduce memory (fallback for containers)
+                    # Suppress additional container-specific errors
+                    '--no-zygote',  # Disable zygote process (not needed in containers)
+                    '--disable-audio-output',  # Disable audio (PulseAudio/ALSA errors)
+                    '--autoplay-policy=no-user-gesture-required',  # Prevent audio-related warnings
+                    '--log-level=3',  # Only show ERROR level and above (suppress INFO/WARNING)
                 ]
                 
-                # Increase timeout for cold start (60s on first attempt, 45s on retry)
-                launch_timeout = 60000 if attempt == 0 else 45000
+                # Increase timeout for cold start (120s on first attempt, 90s on retry)
+                # Further extended due to persistent timeout issues in Cloud Run
+                launch_timeout = 120000 if attempt == 0 else 90000
                 
                 self.browser = await self._playwright.chromium.launch(
                     headless=self.headless,

@@ -4,11 +4,15 @@ Shadow Director Version Information
 """
 
 # バージョン情報
-__version__ = "1.9.0"
-__update_date__ = "2026-01-12"
+__version__ = "1.9.2"
+__update_date__ = "2026-01-31"
 
 # 最新の追加機能リスト
 LATEST_FEATURES = [
+    # v1.9.2 - README修正
+    "READMEのMermaid構文エラーを修正（GCSパスの表記修正）",
+    # v1.9.1 - プロジェクト状態同期
+    "READMEとバージョン情報の同期更新",
     # v1.9.0 - テーブル内短文記述改善(ドラフト安定版)
     "テーブル内短文記述の制限を緩和（短い単語、体言止め、またはコマンド的な表現）",
     # v1.8.9 - ログ改善

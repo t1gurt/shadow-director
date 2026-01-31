@@ -91,87 +91,41 @@ NPO法人の代表者は、想いと行動力を持ちながらも、常に事�
 
 ```mermaid
 graph TD
-    User((NPO Representative)) -->|Chat & Upload| Discord
+    User((NPO Representative)) -->|Chat & Upload| Discord[Discord Bot]
     
-    subgraph "Interface Layer"
-        Discord[Discord Bot]
-        ProgressNotifier[Progress Notifier]
-        Discord <-.->|Real-time Updates| ProgressNotifier
+    Discord -->|Route Message| Orchestrator[Orchestrator]
+    
+    subgraph "AI Agents"
+        Orchestrator -->|Interview| Interviewer[Interviewer Agent]
+        Orchestrator -->|Search Grants| Observer[Observer Agent]
+        Orchestrator -->|Create Draft| Drafter[Drafter Agent]
+        Orchestrator -->|PR Content| PRAgent[PR Agent]
     end
-
-    subgraph "Brain Layer (Cloud Run)"
-        Discord -->|Message Event| Orchestrator[Orchestrator Agent]
+    
+    subgraph "Gemini Models (Vertex AI)"
+        Interviewer --> GeminiPro[Gemini 3.0 Pro]
+        Observer --> GeminiFlash[Gemini 3.0 Flash]
+        Drafter --> GeminiPro
+        PRAgent --> GeminiPro
         
-        %% File Processing Pipeline
-        Orchestrator -->|Step 1: Classify| FileClassifier[File Classifier]
-        FileClassifier -->|Profile/Draft/Format| FileProcessor[File Processor]
-        
-        %% Agent Routing
-        Orchestrator -->|Route: INTERVIEW| Interviewer[Interviewer Agent]
-        Orchestrator -->|Route: OBSERVE| Observer[Observer Agent]
-        Orchestrator -->|Route: DRAFT| Drafter[Drafter Agent]
-        Orchestrator -->|Route: PR| PRAgent[PR Agent]
-        
-        subgraph "Vertex AI Backend"
-            GeminiClient[Gemini Client Factory]
-            GeminiClient -->|vertexai=True| VertexAI[Vertex AI API]
-            VertexAI --> GeminiPro[Gemini 3.0 Pro]
-            VertexAI --> GeminiFlash[Gemini 3.0 Flash]
-            VertexAI --> Imagen3[Imagen 3]
-        end
-        
-        Interviewer --> GeminiClient
-        Observer --> GeminiClient
-        Drafter --> GeminiClient
-        PRAgent --> GeminiClient
-        
-        GeminiFlash -->|Grounding| GoogleSearch[Google Search]
+        GeminiFlash -->|Search| GoogleSearch[Google Search Grounding]
+        Observer -->|Navigate| Playwright[Playwright Browser]
+        Drafter -->|Visual Analysis| VLM[Multimodal VLM]
+        Drafter -->|Generate Slides| Imagen3[Imagen 3]
     end
-
-    subgraph "SGNA Model (Search-Ground-Navigate-Act)"
-        Observer -->|1. Search| GrantFinder[Grant Finder]
-        GrantFinder -->|2. Navigate| Playwright[Playwright Browser]
-        Playwright -->|3. Act| PageScraper[Grant Page Scraper]
-        PageScraper -->|Download| FileDownloader[File Downloader]
-        FileDownloader -->|4. Validate| FileValidator[File Validator]
-        FileValidator -->|Year/Round Check| GeminiFlash
+    
+    subgraph "Storage (GCS)"
+        GCS[(Cloud Storage)]
+        Interviewer <-->|"profiles/{user_id}"| GCS
+        Observer <-->|"reports/{user_id}"| GCS
+        Drafter <-->|"drafts/{user_id}"| GCS
     end
-
-    subgraph "Document Processing Pipeline"
-        Drafter -->|Detect Format| VisualAnalyzer[Visual Analyzer VLM]
-        VisualAnalyzer -->|Field Mapping| FormatFieldMapper[Format Field Mapper]
-        FormatFieldMapper -->|Auto-fill| DocumentFiller[Document Filler]
-        DocumentFiller -->|Word/Excel| OfficeUtils[Office Utils]
-    end
-
-    subgraph "Reporting & Visualization"
-        Observer -->|Monthly Summary| SlideGenerator[Slide Generator]
-        SlideGenerator -->|Imagen 3 / Matplotlib| ReportSlides[Report Slides]
-        PRAgent -->|SNS Content| GeminiPro
-    end
-
-    subgraph "Storage Layer (GCS)"
-        ProfileMgr[Profile Manager]
-        GCS[(Google Cloud Storage)]
-        
-        Interviewer <-->|Save/Load| ProfileMgr
-        Observer <-->|Read Profile| ProfileMgr
-        Drafter <-->|Read Profile| ProfileMgr
-        PRAgent <-->|Read Profile| ProfileMgr
-        
-        ProfileMgr <-->|profiles/{user_id}| GCS
-        Drafter <-->|drafts/{user_id}| GCS
-        Observer <-->|reports/{user_id}| GCS
-    end
-
-    subgraph "Action Layer"
-        Drafter -->|Create Doc| GDocs[Google Docs API]
-        Orchestrator -->|Send Files & Messages| Discord
-    end
+    
+    Orchestrator -->|Response| Discord
     
     subgraph "Scheduling"
-        WeeklyTask[Weekly Observer<br/>168 hours] -->|Auto Trigger| Observer
-        MonthlyTask[Monthly Report<br/>1st of month, 9:00 AM] -->|Auto Trigger| Observer
+        WeeklyTask[Weekly: 168h] -.->|Trigger| Observer
+        MonthlyTask[Monthly: 1st, 9AM] -.->|Trigger| Observer
     end
 ```
 
@@ -238,7 +192,8 @@ shadow-director/
 │   │   ├── site_explorer.py         # Playwright基盤クラス
 │   │   ├── slide_generator.py       # スライド画像生成（Imagen 3/matplotlib）
 │   │   ├── document_filler.py       # Word/Excel自動入力エンジン
-│   │   └── file_downloader.py       # HTTPファイルダウンローダー
+│   │   ├── file_downloader.py       # HTTPファイルダウンローダー
+│   │   └── url_analyzer.py          # URL解析ユーティリティ
 │   ├── logic/
 │   │   ├── grant_finder.py          # 助成金検索ロジック（SGNAモデル）
 │   │   ├── grant_validator.py       # URL検証・品質評価
@@ -356,33 +311,21 @@ gcloud run deploy shadow-director-bot \
    - `View Channels`
 5. Use generated URL to invite bot to your server
 
-## 🌐 Current Deployment Status
-
-**Environment:** Production (Google Cloud Run)
-- **Service URL:** `https://shadow-director-bot-182793624818.us-central1.run.app`
-- **Latest Revision:** `shadow-director-bot-00125-rwk`
-- **Last Deployed:** 2026-01-05 21:19 JST
-- **Region:** `us-central1`
-- **Status:** ✅ Active
-- **Version:** 1.8.0
-
-### Latest Updates (v1.8.0)
-- 🏗️ **内部構造改善**: OrchestratorとDrafterAgentのリファクタリングにより、ファイル分類ロジック`FileClassifier`を分離・最適化
-- 🚀 **処理効率化**: ファイル分類を早期段階（Step 1.5）で実行し、無関係なファイルの解析処理をスキップ
-- 🛡️ **検索精度向上**: Google Search GroundingやSearch Toolのクエリ厳格化により、無関係なWebページ探索を防止
-
-### Latest Updates (v1.7.0)
-- 📝 **項目別フォーマット入力**: VLMで検出した入力項目を、1項目ずつGemini 3.0 Flashとプロファイルをもとに生成・入力
-
-### Latest Updates (v1.6.0)
-- 📝 **申請書特化インタビュー**: 団体基本情報やプロジェクト詳細（構想・計画・予算）を対話で引き出し、プロファイルに保存
-- 👁️ **VLM入力パターン検出**: Word申請書の入力欄（下線、括弧、次行など）をGemini 3.0 Flash (VLM) で視覚的に特定し、自動入力精度を向上
-- 🔧 **モデル構成等の柔軟化**: プロンプト設定ファイルによるVLMモデル切り替えに対応
-- 🏢 **団体情報管理**: スタッフ数、予算規模、設立年などの定量的データを構造化保存
-
 ## 📝 License
 
 This project is built for Zenn Agentic AI Hackathon 2025.
+
+---
+
+### Latest Updates (v1.9.2)
+- 🐛 **ドキュメント修正**: READMEのMermaid構文エラーを修正（GCSパスの表記）
+
+### Latest Updates (v1.9.1)
+- 📋 **プロジェクト状態同期**: READMEとバージョン情報を最新化
+- 🔧 **ディレクトリ構成更新**: `url_analyzer.py` を tools に追加
+
+### Latest Updates (v1.9.0)
+- ✍️ **テーブル内短文記述改善**: 短い単語、体言止め、コマンド的な表現の制限を緩和
 
 ---
 

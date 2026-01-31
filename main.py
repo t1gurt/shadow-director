@@ -9,6 +9,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 import asyncio
+import urllib.parse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -211,14 +212,65 @@ async def on_message(message):
             # Show typing indicator
             async with message.channel.typing():
                 if orchestrator:
-                    # Always route through orchestrator, which will handle attachments appropriately
-                    # Run potentially blocking synchronous code in a separate thread to avoid blocking the event loop
-                    response = await asyncio.to_thread(
-                        orchestrator.route_message,
-                        user_input, 
-                        str(message.channel.id),
-                        attachments=message.attachments if message.attachments else None
-                    )
+                    # Handle file attachments in async context
+                    if message.attachments:
+                        # Call interviewer's async file processing method directly
+                        # This avoids the asyncio event loop error from threading
+                        try:
+                            response = await orchestrator.interviewer.process_with_files_and_urls(
+                                user_input,
+                                str(message.channel.id),
+                                attachments=message.attachments
+                            )
+                        except ValueError as e:
+                            # MIMEタイプエラー - サポート外のファイル形式
+                            logging.error(f"Unsupported file format: {e}", exc_info=True)
+                            
+                            # Extract filenames from error message or attachments
+                            unsupported_files = [att.filename for att in message.attachments]
+                            
+                            error_response = f"⚠️ **サポートされていないファイル形式が含まれています**\n\n"
+                            error_response += f"**送信されたファイル**: {', '.join([f'`{f}`' for f in unsupported_files])}\n\n"
+                            error_response += f"**エラー詳細**:\n{str(e)}\n\n"
+                            error_response += "---\n\n"
+                            error_response += "**📋 サポートされているファイル形式**:\n\n"
+                            error_response += "**ドキュメント**: PDF, TXT, MD, HTML, CSS, JS, Python, JSON, XML, CSV\n"
+                            error_response += "**画像**: JPEG, PNG, WebP, GIF, HEIC, HEIF\n"
+                            error_response += "**音声**: WAV, MP3, AIFF, AAC, OGG, FLAC\n"
+                            error_response += "**動画**: MP4, MPEG, MOV, AVI, FLV, WebM, WMV, 3GPP\n\n"
+                            error_response += "---\n\n"
+                            error_response += "**💡 解決方法**:\n\n"
+                            error_response += "1. **PowerPoint (.pptx) の場合** → PDFに変換してから送信\n"
+                            error_response += "2. **Word (.docx) の場合** → PDFに変換してから送信\n"
+                            error_response += "3. **Excel (.xlsx) の場合** → PDFまたはCSVに変換してから送信\n"
+                            error_response += "4. **資料の内容を直接テキストで教えていただく** こともできます\n\n"
+                            error_response += "お手数ですが、上記の形式に変換してから再度お試しください。"
+                            
+                            await message.channel.send(error_response)
+                            return
+                        except Exception as e:
+                            # その他のエラー
+                            logging.error(f"File processing error: {e}", exc_info=True)
+                            
+                            error_response = f"⚠️ **ファイルの処理中にエラーが発生しました**\n\n"
+                            error_response += f"**エラー内容**: {str(e)}\n\n"
+                            error_response += "---\n\n"
+                            error_response += "**💡 以下の方法をお試しください**:\n\n"
+                            error_response += "1. ファイルサイズが大きすぎる場合は、小さくしてから再送信\n"
+                            error_response += "2. ファイルが破損していないか確認\n"
+                            error_response += "3. サポートされている形式（PDF、画像など）に変換\n"
+                            error_response += "4. 資料の内容を直接テキストで教えていただく\n\n"
+                            error_response += "もし問題が解決しない場合は、通常の対話形式で情報を教えていただけますか？"
+                            
+                            await message.channel.send(error_response)
+                            return
+                    else:
+                        # No attachments - use normal synchronous routing
+                        response = await asyncio.to_thread(
+                            orchestrator.route_message,
+                            user_input, 
+                            str(message.channel.id)
+                        )
                 else:
                     response = "System initializing... Please wait."
             
@@ -294,9 +346,12 @@ async def on_message(message):
                                     except Exception as del_err:
                                         logging.error(f"[FORMAT_FILE] Failed to delete oversized file: {del_err}")
                                 else:
-                                    filename = os.path.basename(file_path)
-                                    discord_file = discord.File(file_path, filename=filename)
-                                    await message.channel.send(file=discord_file)
+                                    filename = urllib.parse.unquote(os.path.basename(file_path))
+                                    # Read file as binary to handle Japanese filenames properly
+                                    with open(file_path, 'rb') as f:
+                                        file_bytes = io.BytesIO(f.read())
+                                        discord_file = discord.File(file_bytes, filename=filename)
+                                        await message.channel.send(file=discord_file)
                                     logging.info(f"[FORMAT_FILE] File sent: {filename}")
                                     
                                     # Delete file after successful send
@@ -355,9 +410,12 @@ async def on_message(message):
                                     except Exception as del_err:
                                         logging.error(f"[FILLED_FILE] Failed to delete oversized file: {del_err}")
                                 else:
-                                    filename = os.path.basename(file_path)
-                                    discord_file = discord.File(file_path, filename=filename)
-                                    await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
+                                    filename = urllib.parse.unquote(os.path.basename(file_path))
+                                    # Read file as binary to handle Japanese filenames properly
+                                    with open(file_path, 'rb') as f:
+                                        file_bytes = io.BytesIO(f.read())
+                                        discord_file = discord.File(file_bytes, filename=filename)
+                                        await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
                                     logging.info(f"[FILLED_FILE] File sent: {filename}")
                                     
                                     # Delete file after successful send
@@ -389,13 +447,39 @@ async def on_message(message):
                     for match in re.finditer(r'\[ATTACHMENT_NEEDED:([^:]+):([^\]]+)\]', response):
                         response = response.replace(match.group(0), '').strip()
                     
-                    # Ensure response is within Discord's 2000 char limit
-                    MAX_LENGTH = 2000
-                    if len(response) > MAX_LENGTH:
-                        response = response[:MAX_LENGTH - 50] + "\n\n...(省略)..."
+                    # Split long messages into multiple Discord messages (2000 char limit)
+                    MAX_LENGTH = 1900  # Leave some buffer
                     
-                    # Send response text first
-                    await message.channel.send(response)
+                    async def send_long_message(channel, text):
+                        """Split and send long messages"""
+                        if len(text) <= MAX_LENGTH:
+                            await channel.send(text)
+                            return
+                        
+                        # Try to split at section boundaries (---)
+                        parts = []
+                        current_part = ""
+                        
+                        for line in text.split('\n'):
+                            if len(current_part) + len(line) + 1 > MAX_LENGTH:
+                                if current_part:
+                                    parts.append(current_part)
+                                current_part = line
+                            else:
+                                current_part += ('\n' if current_part else '') + line
+                        
+                        if current_part:
+                            parts.append(current_part)
+                        
+                        # Send each part
+                        for i, part in enumerate(parts):
+                            if part.strip():
+                                if i > 0:
+                                    part = f"**(続き {i+1}/{len(parts)})**\n" + part
+                                await channel.send(part)
+                    
+                    # Send response text in chunks
+                    await send_long_message(message.channel, response)
                     
                     # Process each attachment
                     for user_id, filename_hint in matches:
@@ -527,9 +611,12 @@ async def on_message(message):
                                 if os.path.exists(file_path):
                                     file_size = os.path.getsize(file_path)
                                     if file_size <= 25 * 1024 * 1024:
-                                        filename = os.path.basename(file_path)
-                                        discord_file = discord.File(file_path, filename=filename)
-                                        await message.channel.send(file=discord_file)
+                                        filename = urllib.parse.unquote(os.path.basename(file_path))
+                                        # Read file as binary to handle Japanese filenames properly
+                                        with open(file_path, 'rb') as f:
+                                            file_bytes = io.BytesIO(f.read())
+                                            discord_file = discord.File(file_bytes, filename=filename)
+                                            await message.channel.send(file=discord_file)
                                         logging.info(f"[PROGRESS_CB] Sent format file: {filename}")
                                         try:
                                             os.remove(file_path)
@@ -599,6 +686,7 @@ async def on_message(message):
                         if "[FORMAT_FILE_NEEDED:" in draft_result:
                             import re
                             import io
+                            import os
                             
                             format_file_matches = re.findall(r'\[FORMAT_FILE_NEEDED:([^:]+):([^\]]+)\]', draft_result)
                             for user_id_f, file_path in format_file_matches:
@@ -607,9 +695,12 @@ async def on_message(message):
                                     if os.path.exists(file_path):
                                         file_size = os.path.getsize(file_path)
                                         if file_size <= 25 * 1024 * 1024:
-                                            filename = os.path.basename(file_path)
-                                            discord_file = discord.File(file_path, filename=filename)
-                                            await message.channel.send(file=discord_file)
+                                            filename = urllib.parse.unquote(os.path.basename(file_path))
+                                            # Read file as binary to handle Japanese filenames properly
+                                            with open(file_path, 'rb') as f:
+                                                file_bytes = io.BytesIO(f.read())
+                                                discord_file = discord.File(file_bytes, filename=filename)
+                                                await message.channel.send(file=discord_file)
                                             try:
                                                 os.remove(file_path)
                                             except:
@@ -628,9 +719,12 @@ async def on_message(message):
                                     if os.path.exists(file_path):
                                         file_size = os.path.getsize(file_path)
                                         if file_size <= 25 * 1024 * 1024:
-                                            filename = os.path.basename(file_path)
-                                            discord_file = discord.File(file_path, filename=filename)
-                                            await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
+                                            filename = urllib.parse.unquote(os.path.basename(file_path))
+                                            # Read file as binary to handle Japanese filenames properly
+                                            with open(file_path, 'rb') as f:
+                                                file_bytes = io.BytesIO(f.read())
+                                                discord_file = discord.File(file_bytes, filename=filename)
+                                                await message.channel.send(f"📋 **記入済み**: `{filename}`", file=discord_file)
                                             try:
                                                 os.remove(file_path)
                                             except:
@@ -698,6 +792,40 @@ async def on_message(message):
             on_message.processing.remove(message.id)
             logging.info(f"[DEDUP] Cleaned up message {message.id} from processing set")
 
+async def run_discord_with_retry(max_retries: int = 5):
+    """
+    Discord クライアントを接続リトライ付きで実行する。
+    Cloud Run でのネットワーク一時的問題に対応するため、
+    接続失敗時は指数バックオフでリトライする。
+    
+    Args:
+        max_retries: 最大リトライ回数（デフォルト: 5）
+    """
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            logging.info(f"Starting Discord Client... (attempt {retry_count + 1}/{max_retries})")
+            await client.start(TOKEN)
+            # If client.start() returns normally, it means the connection was closed gracefully
+            logging.info("Discord client disconnected gracefully.")
+            break
+        except asyncio.TimeoutError as e:
+            retry_count += 1
+            wait_time = min(30 * retry_count, 120)  # 30秒, 60秒, 90秒, 120秒, 120秒
+            logging.error(f"Discord connection timeout ({retry_count}/{max_retries}): {e}")
+            if retry_count < max_retries:
+                logging.info(f"Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+            else:
+                logging.critical("Max retries reached for timeout errors. Exiting...")
+                raise
+        except Exception as e:
+            # For other exceptions, log and re-raise immediately
+            logging.critical(f"Discord Client crash: {e}")
+            raise
+
+
 def main():
     global orchestrator
     
@@ -720,14 +848,13 @@ def main():
             logging.critical(f"Failed to initialize Orchestrator: {e}")
             # Do NOT exit. Container keeps running.
         
-        # 3. Run Discord Client (Blocking)
+        # 3. Run Discord Client with retry logic
         try:
-            logging.info("Starting Discord Client...")
-            client.run(TOKEN)
+            asyncio.run(run_discord_with_retry())
         except Exception as e:
-            logging.critical(f"Discord Client crash: {e}")
-            # If client crashes, we exit main, daemon thread dies, container dies.
-            # This is correct behavior for a bot crash.
+            logging.critical(f"Discord Client failed after retries: {e}")
+            # If client crashes after all retries, we exit main, daemon thread dies, container dies.
+            # Cloud Run will restart the container.
 
 if __name__ == "__main__":
     main()

@@ -162,13 +162,22 @@ class GrantFinder:
 クエリが示唆する戦略を使用してください。
 見つかった上位3つの機会について報告してください。
 """
+        
+        # 日本語で思考するよう指示を追加（Thinking Outputが日本語になる）
+        full_prompt = "**重要: あなたの内部思考・推論プロセスはすべて日本語で行ってください。**\n\n" + full_prompt
 
         try:
             # Enable Google Search Tool
             tool_config = self.search_tool.get_tool_config()
             
-            # Gemini 3.0 Thinking Mode for grant discovery
-            thinking_config = ThinkingConfig(thinking_level="high")
+            # Gemini 3.0 Thinking Mode for grant discovery with thought output
+            thinking_config = ThinkingConfig(
+                thinking_level="high",
+                include_thoughts=True  # 思考プロセスを取得
+            )
+            
+            notifier = get_progress_notifier()
+            notifier.notify_sync(ProgressStage.SEARCHING, "助成金候補を検索中...", "Gemini 3.0 Thinking Modeで深層推論を実行")
             
             response = self.client.models.generate_content(
                 model=self.model_name,
@@ -178,7 +187,37 @@ class GrantFinder:
                     thinking_config=thinking_config
                 )
             )
-            response_text = response.text if response.text else ""
+            
+            response_text = ""
+            thinking_text = ""
+            
+            # レスポンスからthinking partとtext partを分離
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'thought') and part.thought:
+                        # Thinking output (モデルの思考プロセス)
+                        thinking_text = part.text if hasattr(part, 'text') else ""
+                    elif hasattr(part, 'text'):
+                        # Final output (最終回答)
+                        response_text = part.text
+            
+            # Fallback: 旧形式のレスポンス対応
+            if not response_text and response.text:
+                response_text = response.text
+            
+            # 思考プロセスをDiscordに通知（要約版）
+            if thinking_text:
+                # 長すぎる場合は要約（最初の500文字 + 最後の200文字）
+                if len(thinking_text) > 800:
+                    thought_summary = thinking_text[:500] + "\n...(省略)...\n" + thinking_text[-200:]
+                else:
+                    thought_summary = thinking_text
+                
+                notifier.notify_thought(
+                    "AIの推論プロセス（生ログ）",
+                    thought_summary
+                )
+                logging.info(f"[GRANT_FINDER] Thinking output ({len(thinking_text)} chars): {thinking_text[:200]}...")
             
             # Validate response_text before parsing
             if not response_text:
@@ -288,11 +327,19 @@ class GrantFinder:
 - **信頼度理由**: [理由]
 """
         
+        # 日本語で思考するよう指示を追加
+        full_prompt = "**重要: あなたの内部思考・推論プロセスはすべて日本語で行ってください。**\n\n" + full_prompt
+        
         try:
             tool_config = self.search_tool.get_tool_config()
             
             # Gemini 3.0 Thinking Mode for deep reasoning during page investigation
-            thinking_config = ThinkingConfig(thinking_level="high")
+            thinking_config = ThinkingConfig(
+                thinking_level="high",
+                include_thoughts=True  # 思考プロセスを取得
+            )
+            
+            notifier = get_progress_notifier()
             
             response = self.client.models.generate_content(
                 model=self.model_name,
@@ -304,7 +351,35 @@ class GrantFinder:
                 )
             )
             
-            response_text = response.text
+            response_text = ""
+            thinking_text = ""
+            
+            # レスポンスからthinking partとtext partを分離
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'thought') and part.thought:
+                        thinking_text = part.text if hasattr(part, 'text') else ""
+                    elif hasattr(part, 'text'):
+                        response_text += part.text
+            
+            # Fallback: 旧形式のレスポンス対応
+            if not response_text and response.text:
+                response_text = response.text
+            
+            # 思考プロセスをDiscordに通知
+            if thinking_text:
+                # 長すぎる場合は要約
+                if len(thinking_text) > 600:
+                    thought_summary = thinking_text[:400] + "\n...(省略)...\n" + thinking_text[-150:]
+                else:
+                    thought_summary = thinking_text
+                
+                notifier.notify_thought(
+                    f"[{grant_display_name}] 公式ページ調査の推論",
+                    thought_summary
+                )
+                logging.info(f"[GRANT_FINDER] Thinking output for {grant_name}: {thinking_text[:200]}...")
+            
             logging.info(f"[GRANT_FINDER] Response: {response_text[:200]}...")
             
             # Parse response
@@ -350,13 +425,19 @@ class GrantFinder:
                 result['url_quality_score'] = quality_score
                 result['url_quality_reason'] = quality_reason
                 
-                # Notify user about URL quality
+                # Agent Thought: 判断根拠を先に表示（脳内開示）
+                notifier.notify_thought(
+                    f"[{grant_display_name}] ドメイン解析完了",
+                    quality_reason
+                )
+                
+                # Notify user about URL quality with enhanced format
                 if quality_score >= 70:
-                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ✅ 信頼性評価: {quality_score}点", quality_reason)
+                    notifier.notify_sync(ProgressStage.VERIFYING, f"[{grant_display_name}] ➡ 信頼性評価: {quality_score}点 (Verified)", None)
                 elif quality_score >= 50:
-                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ⚠️ 信頼性評価: {quality_score}点", quality_reason)
+                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ➡ 信頼性評価: {quality_score}点", None)
                 else:
-                    notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ❌ 信頼性評価: {quality_score}点（低）", quality_reason)
+                    notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ➡ 信頼性評価: {quality_score}点（低）", None)
                 
                 if quality_score < 50:
                     logging.warning(f"[GRANT_FINDER] Low quality URL: {result['official_url']}")
@@ -383,23 +464,39 @@ class GrantFinder:
                         playwright_result = self._run_playwright_verification(final_url, grant_name)
                         
                         if playwright_result:
-                            result['playwright_verified'] = True
-                            result['playwright_confidence'] = playwright_result.get('confidence', 0)
-                            result['format_files'] = playwright_result.get('format_files', [])
-                            
-                            # Notify Playwright results
-                            file_count = len(result.get('format_files', []))
-                            if file_count > 0:
-                                notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📎 フォーマットファイル {file_count}件 発見", "申請書様式を検出しました")
-                            
-                            # Update deadline info if found
-                            if playwright_result.get('deadline_info'):
-                                deadline = playwright_result['deadline_info']
-                                if deadline.get('date'):
-                                    result['deadline_end'] = deadline['date']
-                                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📅 締切日: {deadline['date']}", "ページから締切日を抽出しました")
-                            
-                            logging.info(f"[GRANT_FINDER] Playwright found {file_count} format files")
+                            # 障害検知の確認（ログイン壁、404等）
+                            if playwright_result.get('obstacle_detected'):
+                                obstacle_type = playwright_result.get('obstacle_type', '不明な障害')
+                                page_title = playwright_result.get('title', '')
+                                
+                                # 障害検知を表示
+                                notifier.notify_obstacle(obstacle_type, f"ページタイトル: \"{page_title}\"")
+                                
+                                # Agent Thought: 障害への対応を説明
+                                notifier.notify_thought(
+                                    f"[{grant_display_name}] 障害を検出",
+                                    f"このURLは{obstacle_type}です。公募情報を取得できないため、代替ルートを探索する必要があります。"
+                                )
+                                
+                                logging.warning(f"[GRANT_FINDER] Obstacle detected: {obstacle_type}")
+                            else:
+                                result['playwright_verified'] = True
+                                result['playwright_confidence'] = playwright_result.get('confidence', 0)
+                                result['format_files'] = playwright_result.get('format_files', [])
+                                
+                                # Notify Playwright results
+                                file_count = len(result.get('format_files', []))
+                                if file_count > 0:
+                                    notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📎 フォーマットファイル {file_count}件 発見", "申請書様式を検出しました")
+                                
+                                # Update deadline info if found
+                                if playwright_result.get('deadline_info'):
+                                    deadline = playwright_result['deadline_info']
+                                    if deadline.get('date'):
+                                        result['deadline_end'] = deadline['date']
+                                        notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] 📅 締切日: {deadline['date']}", "ページから締切日を抽出しました")
+                                
+                                logging.info(f"[GRANT_FINDER] Playwright found {file_count} format files")
                         else:
                             notifier.notify_sync(ProgressStage.ANALYZING, f"[{grant_display_name}] ℹ️ Playwright検証完了", "追加情報は見つかりませんでした")
                     except Exception as pw_error:
@@ -548,7 +645,17 @@ class GrantFinder:
         # Create shortened grant name for display (max 20 chars)
         grant_display_name = grant_name[:20] + "..." if len(grant_name) > 20 else grant_name
         
-        notifier.notify_sync(ProgressStage.WARNING, f"[{grant_display_name}] ⚠️ URL検証失敗", f"代替URLを検索中... ({failure_reason})")
+        # 障害検知を表示（リカバリー演出）
+        notifier.notify_obstacle("アクセス不能", f"[{grant_display_name}] {failure_reason}")
+        
+        # Agent Thought: 戦略変更の思考プロセスを表示
+        notifier.notify_thought(
+            f"[{grant_display_name}] 戦略変更",
+            f"指定されたURLにアクセスできないため、助成金名をキーに一般公開されている公式ページをGoogle検索で探します。"
+        )
+        
+        # リカバリー演出: 再検索開始
+        notifier.notify_recovery(f"[{grant_display_name}] 再検索を実行中...", "代替URLを探索")
         
         # Extract organization name for targeted retry search
         org_name = self.validator.extract_organization_name(grant_name)
@@ -604,6 +711,8 @@ class GrantFinder:
             site_restriction = " OR ".join([f"site:{d}" for d in self.TRUSTED_DOMAINS])
             
             retry_prompt = f"""
+**重要: あなたの内部思考・推論プロセスはすべて日本語で行ってください。**
+
 助成金の公式申請ページを検索してください。
 
 **検索クエリ（SGNAモデル）:** `"{query}" ({site_restriction})`
@@ -620,7 +729,10 @@ class GrantFinder:
 """
             try:
                 # Gemini 3.0 Thinking Mode for retry search
-                thinking_config = ThinkingConfig(thinking_level="high")
+                thinking_config = ThinkingConfig(
+                    thinking_level="high",
+                    include_thoughts=True
+                )
                 
                 response = self.client.models.generate_content(
                     model=self.model_name,
@@ -631,10 +743,32 @@ class GrantFinder:
                         thinking_config=thinking_config
                     )
                 )
-
-                logging.info(f"[GRANT_FINDER] Retry {retry_num + 1} response: {response.text}")
                 
-                retry_url_match = re.search(r'\*\*公式URL\*\*:\s*(.+)', response.text)
+                response_text = ""
+                thinking_text = ""
+                
+                # レスポンスからthinking partを抽出
+                if response.candidates and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if hasattr(part, 'thought') and part.thought:
+                            thinking_text = part.text if hasattr(part, 'text') else ""
+                        elif hasattr(part, 'text'):
+                            response_text += part.text
+                
+                if not response_text and response.text:
+                    response_text = response.text
+                
+                # 思考プロセスをDiscord通知（リカバリー中の推論）
+                if thinking_text:
+                    thought_summary = thinking_text[:300] if len(thinking_text) > 300 else thinking_text
+                    notifier.notify_thought(
+                        f"[{grant_display_name}] リカバリー検索の推論",
+                        thought_summary
+                    )
+
+                logging.info(f"[GRANT_FINDER] Retry {retry_num + 1} response: {response_text}")
+                
+                retry_url_match = re.search(r'\*\*公式URL\*\*:\s*(.+)', response_text)
                 if retry_url_match:
                     retry_url = retry_url_match.group(1).strip()
                     retry_url = self.validator.resolve_redirect_url(retry_url)

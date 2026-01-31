@@ -74,17 +74,60 @@ class FileProcessor:
         Determine MIME type from filename extension.
         """
         ext = filename.lower().split('.')[-1]
+        # Vertex AI supported MIME types
+        # Reference: https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/gemini
         mime_types = {
+            # Documents
             'pdf': 'application/pdf',
             'txt': 'text/plain',
             'md': 'text/markdown',
+            'html': 'text/html',
+            'htm': 'text/html',
+            'css': 'text/css',
+            'js': 'application/javascript',
+            'py': 'text/x-python',
+            'json': 'application/json',
+            'xml': 'application/xml',
+            'csv': 'text/csv',
+            
+            # Images
             'jpg': 'image/jpeg',
             'jpeg': 'image/jpeg',
             'png': 'image/png',
             'webp': 'image/webp',
             'gif': 'image/gif',
+            'heic': 'image/heic',
+            'heif': 'image/heif',
+            
+            # Audio
+            'wav': 'audio/wav',
+            'mp3': 'audio/mp3',
+            'aiff': 'audio/aiff',
+            'aac': 'audio/aac',
+            'ogg': 'audio/ogg',
+            'flac': 'audio/flac',
+            
+            # Video
+            'mp4': 'video/mp4',
+            'mpeg': 'video/mpeg',
+            'mpg': 'video/mpeg',
+            'mov': 'video/mov',
+            'avi': 'video/avi',
+            'flv': 'video/x-flv',
+            'webm': 'video/webm',
+            'wmv': 'video/x-ms-wmv',
+            '3gp': 'video/3gpp',
+            '3gpp': 'video/3gpp',
         }
-        return mime_types.get(ext, 'application/octet-stream')
+        if ext not in mime_types:
+            supported_formats = ', '.join(sorted(set(mime_types.keys())))
+            raise ValueError(
+                f"ファイル形式 '.{ext}' はサポートされていません。\n"
+                f"サポートされている形式: {supported_formats}\n"
+                f"ファイル名: {filename}"
+            )
+        
+        return mime_types[ext]
     
     async def process_discord_attachments(self, attachments: List[Any]) -> List[Any]:
         """
