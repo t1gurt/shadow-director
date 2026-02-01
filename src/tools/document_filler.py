@@ -814,8 +814,21 @@ class DocumentFiller:
             comment_range_end = OxmlElement('w:commentRangeEnd')
             comment_range_end.set(qn('w:id'), cid)
             
-            # commentReference要素を作成（直接段落に追加しない、別runに入れる）
+            # commentReference要素を作成（w:r 内に入れ、rPrも必須）
             comment_ref_run = OxmlElement('w:r')
+            
+            # ランプロパティ (w:rPr) を追加 - フォントサイズのみ設定（スタイル参照は避ける）
+            run_props = OxmlElement('w:rPr')
+            # コメント参照は通常8pt程度の上付き文字
+            sz = OxmlElement('w:sz')
+            sz.set(qn('w:val'), '16')  # 8pt = 16 half-points
+            run_props.append(sz)
+            szCs = OxmlElement('w:szCs')
+            szCs.set(qn('w:val'), '16')
+            run_props.append(szCs)
+            comment_ref_run.append(run_props)
+            
+            # commentReference を追加
             comment_ref = OxmlElement('w:commentReference')
             comment_ref.set(qn('w:id'), cid)
             comment_ref_run.append(comment_ref)
@@ -823,8 +836,14 @@ class DocumentFiller:
             # 段落の最初と最後にマーカーを挿入
             para_element = paragraph._p
             
-            # 段落の最初にcommentRangeStartを挿入
-            if para_element[0] is not None:
+            # pPr（段落プロパティ）がある場合、その後に挿入
+            # pPrがない場合は最初に挿入
+            pPr = para_element.find(qn('w:pPr'))
+            if pPr is not None:
+                # pPrの次に挿入
+                pPr_index = list(para_element).index(pPr)
+                para_element.insert(pPr_index + 1, comment_range_start)
+            elif len(para_element) > 0:
                 para_element.insert(0, comment_range_start)
             else:
                 para_element.append(comment_range_start)
@@ -881,13 +900,35 @@ class DocumentFiller:
             comment.set(qn('w:initials'), 'SD')
             
             # コメント本文を段落として追加
-            comment_para = OxmlElement('w:p')
-            comment_run = OxmlElement('w:r')
-            comment_text_elem = OxmlElement('w:t')
-            comment_text_elem.text = comment_text
-            comment_run.append(comment_text_elem)
-            comment_para.append(comment_run)
-            comment.append(comment_para)
+            # 複数行がある場合は分割
+            lines = comment_text.split('\n')
+            
+            for line in lines:
+                comment_para = OxmlElement('w:p')
+                
+                # 段落プロパティ (w:pPr) を追加
+                para_props = OxmlElement('w:pPr')
+                comment_para.append(para_props)
+                
+                if line.strip():
+                    comment_run = OxmlElement('w:r')
+                    
+                    # ランプロパティ (w:rPr) を追加 - これが欠落するとエラーになる
+                    run_props = OxmlElement('w:rPr')
+                    run_props_lang = OxmlElement('w:lang')
+                    run_props_lang.set(qn('w:val'), 'ja-JP')
+                    run_props.append(run_props_lang)
+                    comment_run.append(run_props)
+                    
+                    # テキスト要素を作成
+                    comment_text_elem = OxmlElement('w:t')
+                    comment_text_elem.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                    comment_text_elem.text = line
+                    comment_run.append(comment_text_elem)
+                    
+                    comment_para.append(comment_run)
+                
+                comment.append(comment_para)
             
             # commentsに追加
             comments_element.append(comment)
@@ -1109,15 +1150,8 @@ class DocumentFiller:
             # 一時ファイルを作成
             temp_path = docx_path + ".tmp"
             
-            # XMLのシリアライズ
-            # commentsのXMLには名前空間宣言が必要
-            comments_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-"""
-            for comment in comments_element:
-                comments_xml += etree.tostring(comment, encoding='unicode')
-            comments_xml += "</w:comments>"
+            # 正しいOOXML形式のcomments.xmlを手動で構築
+            comments_xml = self._build_comments_xml(comments_element)
             
             # 既存のdocxを読み込んで新しいファイルに書き出し
             with zipfile.ZipFile(docx_path, 'r') as zin:
@@ -1158,29 +1192,32 @@ class DocumentFiller:
     def _add_comments_relationship(self, rels_content: str) -> str:
         """
         document.xml.relsにコメント参照を追加する。
+        シンプルな文字列置換方式で信頼性を向上。
         """
         try:
-            from lxml import etree
-            
             # 既にコメント参照がある場合はスキップ
             if 'comments.xml' in rels_content:
+                self.logger.debug("[DOC_FILLER] Comments relationship already exists")
                 return rels_content
             
-            # XMLをパース
-            root = etree.fromstring(rels_content.encode('utf-8'))
-            ns = {'r': 'http://schemas.openxmlformats.org/package/2006/relationships'}
+            import re
             
-            # 新しいIDを生成（既存のID + 1）
-            existing_ids = [int(r.get('Id').replace('rId', '')) for r in root.findall('.//r:Relationship', ns) if r.get('Id', '').startswith('rId')]
-            new_id = max(existing_ids) + 1 if existing_ids else 1
+            # 既存のrIdを抽出して最大値を取得
+            rids = re.findall(r'Id="rId(\d+)"', rels_content)
+            max_rid = max([int(r) for r in rids]) if rids else 0
+            new_rid = max_rid + 1
             
-            # コメント参照を追加
-            new_rel = etree.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship')
-            new_rel.set('Id', f'rId{new_id}')
-            new_rel.set('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments')
-            new_rel.set('Target', 'comments.xml')
+            # 新しいリレーションシップを構築
+            new_rel = f'<Relationship Id="rId{new_rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>'
             
-            return etree.tostring(root, encoding='unicode', xml_declaration=True)
+            # </Relationships>の前に挿入
+            if '</Relationships>' in rels_content:
+                rels_content = rels_content.replace('</Relationships>', f'{new_rel}</Relationships>')
+                self.logger.info(f"[DOC_FILLER] Added comments relationship as rId{new_rid}")
+            else:
+                self.logger.warning("[DOC_FILLER] Could not find </Relationships> tag")
+            
+            return rels_content
             
         except Exception as e:
             self.logger.warning(f"[DOC_FILLER] Failed to add comments relationship: {e}")
@@ -1189,25 +1226,85 @@ class DocumentFiller:
     def _add_comments_content_type(self, content_types: str) -> str:
         """
         [Content_Types].xmlにコメントのコンテンツタイプを追加する。
+        シンプルな文字列置換方式で信頼性を向上。
         """
         try:
-            from lxml import etree
-            
             # 既にコメントタイプがある場合はスキップ
             if 'comments.xml' in content_types:
+                self.logger.debug("[DOC_FILLER] Comments content type already exists")
                 return content_types
             
-            # XMLをパース
-            root = etree.fromstring(content_types.encode('utf-8'))
-            ns = 'http://schemas.openxmlformats.org/package/2006/content-types'
+            # 新しいオーバーライドを構築
+            new_override = '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>'
             
-            # コメントのコンテンツタイプを追加
-            override = etree.SubElement(root, f'{{{ns}}}Override')
-            override.set('PartName', '/word/comments.xml')
-            override.set('ContentType', 'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml')
+            # </Types>の前に挿入
+            if '</Types>' in content_types:
+                content_types = content_types.replace('</Types>', f'{new_override}</Types>')
+                self.logger.info("[DOC_FILLER] Added comments content type to [Content_Types].xml")
+            else:
+                self.logger.warning("[DOC_FILLER] Could not find </Types> tag")
             
-            return etree.tostring(root, encoding='unicode', xml_declaration=True)
+            return content_types
             
         except Exception as e:
             self.logger.warning(f"[DOC_FILLER] Failed to add comments content type: {e}")
             return content_types
+    
+    def _build_comments_xml(self, comments_element) -> str:
+        """
+        コメント要素から正しいOOXML形式のcomments.xmlを構築する。
+        
+        Args:
+            comments_element: コメント要素のリスト
+            
+        Returns:
+            comments.xmlの内容
+        """
+        from docx.oxml.ns import qn
+        import html
+        
+        xml_parts = [
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+            '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ',
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ',
+            'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" ',
+            'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">',
+        ]
+        
+        for comment in comments_element:
+            # コメント属性を取得
+            comment_id = comment.get(qn('w:id'), '0')
+            author = comment.get(qn('w:author'), 'Shadow Director AI')
+            date = comment.get(qn('w:date'), '')
+            initials = comment.get(qn('w:initials'), 'SD')
+            
+            # コメント開始タグ
+            xml_parts.append(f'<w:comment w:id="{comment_id}" w:author="{html.escape(author)}" w:date="{date}" w:initials="{initials}">')
+            
+            # 各段落を処理
+            for para in comment:
+                if para.tag.endswith('}p') or para.tag == 'w:p':
+                    xml_parts.append('<w:p>')
+                    xml_parts.append('<w:pPr/>')
+                    
+                    # ラン要素を処理
+                    for run in para:
+                        if run.tag.endswith('}r') or run.tag == 'w:r':
+                            xml_parts.append('<w:r>')
+                            xml_parts.append('<w:rPr><w:lang w:val="ja-JP"/></w:rPr>')
+                            
+                            # テキスト要素を処理
+                            for text_elem in run:
+                                if text_elem.tag.endswith('}t') or text_elem.tag == 'w:t':
+                                    text_content = text_elem.text or ''
+                                    xml_parts.append(f'<w:t xml:space="preserve">{html.escape(text_content)}</w:t>')
+                            
+                            xml_parts.append('</w:r>')
+                    
+                    xml_parts.append('</w:p>')
+            
+            xml_parts.append('</w:comment>')
+        
+        xml_parts.append('</w:comments>')
+        
+        return '\n'.join(xml_parts)

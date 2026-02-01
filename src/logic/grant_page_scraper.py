@@ -186,6 +186,35 @@ class GrantPageScraper:
                     except Exception as dl_e:
                         self.logger.warning(f"[GRANT_SCRAPER] Error exploring download page {dl_url}: {dl_e}")
             
+            # (E) Visual analysis fallback: Use VLM when DOM analysis finds few files
+            if len(format_files) == 0 and self.visual_analyzer:
+                self.logger.info("[GRANT_SCRAPER] Trying visual analysis fallback for file detection")
+                try:
+                    visual_links = await self.visual_analyzer.find_file_links_visually(page, grant_name)
+                    
+                    if visual_links:
+                        self.logger.info(f"[GRANT_SCRAPER] Visual analysis found {len(visual_links)} file links")
+                        
+                        for vl in visual_links:
+                            # クリック座標がある場合、クリックしてURLを取得
+                            if vl.get('click_coordinates'):
+                                clicked_url = await self._click_and_get_url(
+                                    page, 
+                                    vl['click_coordinates'], 
+                                    explorer
+                                )
+                                if clicked_url:
+                                    format_files.append({
+                                        'url': clicked_url,
+                                        'text': vl.get('text', 'Visual detection'),
+                                        'file_type': vl.get('file_type', 'unknown'),
+                                        'relevance_score': 8,
+                                        'source': 'visual_analysis',
+                                        'confidence': vl.get('confidence', 'low')
+                                    })
+                except Exception as visual_e:
+                    self.logger.warning(f"[GRANT_SCRAPER] Visual analysis fallback failed: {visual_e}")
+            
             result['format_files'] = format_files
             
             # Extract deadline information from page text
@@ -932,6 +961,88 @@ class GrantPageScraper:
         
         return dom_files
     
+    async def _click_and_get_url(
+        self, 
+        page: Any, 
+        coordinates: Dict[str, int],
+        explorer: Any = None
+    ) -> Optional[str]:
+        """
+        指定座標をクリックし、ナビゲーション先またはダウンロードURLを取得する。
+        
+        Args:
+            page: Playwright page object
+            coordinates: クリック座標 {'x': int, 'y': int}
+            explorer: SiteExplorerインスタンス（オプション）
+            
+        Returns:
+            取得したURL（ファイルまたはナビゲーション先）、失敗時はNone
+        """
+        if not coordinates or 'x' not in coordinates or 'y' not in coordinates:
+            return None
+        
+        x = coordinates['x']
+        y = coordinates['y']
+        
+        try:
+            self.logger.info(f"[GRANT_SCRAPER] Attempting click at ({x}, {y})")
+            
+            # 現在のURLを保存
+            original_url = page.url
+            
+            # ダウンロードイベントをリッスン
+            download_url = None
+            
+            async def handle_download(download):
+                nonlocal download_url
+                download_url = download.url
+                self.logger.info(f"[GRANT_SCRAPER] Download triggered: {download_url}")
+            
+            page.on('download', handle_download)
+            
+            # クリック実行
+            await page.mouse.click(x, y)
+            
+            # 少し待機してダウンロードまたはナビゲーションを検出
+            await page.wait_for_timeout(1000)
+            
+            # ダウンロードURLが取得できた場合
+            if download_url:
+                return download_url
+            
+            # ナビゲーションが発生した場合
+            current_url = page.url
+            if current_url != original_url:
+                self.logger.info(f"[GRANT_SCRAPER] Navigation detected: {current_url}")
+                
+                # ファイルURLかどうかをチェック
+                if any(current_url.lower().endswith(ext) for ext in ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip']):
+                    return current_url
+                
+                # 元のページに戻る
+                await page.go_back()
+                await page.wait_for_timeout(500)
+            
+            # クリック位置のリンクを直接取得試行
+            element = await page.evaluate(f'''() => {{
+                const el = document.elementFromPoint({x}, {y});
+                if (el) {{
+                    const link = el.closest('a');
+                    if (link) return link.href;
+                }}
+                return null;
+            }}''')
+            
+            if element:
+                self.logger.info(f"[GRANT_SCRAPER] Found link at click position: {element}")
+                return element
+            
+            return None
+            
+        except Exception as e:
+            self.logger.warning(f"[GRANT_SCRAPER] Click and get URL failed: {e}")
+            return None
+    
     # ====== 障害検知メソッド ======
     
     # 障害パターン定義（タイトルに含まれるキーワード -> 障害タイプ）
@@ -972,3 +1083,326 @@ class GrantPageScraper:
                 return obstacle_type
         
         return ""
+    
+    # ====== Fallback: ホームページからのナビゲーション探索 ======
+    
+    # ホームページナビゲーション用キーワード（優先順）
+    HOMEPAGE_NAV_KEYWORDS = [
+        # 助成金・事業関連（最優先）
+        '助成', '補助金', '事業案内', '事業紹介', '支援事業',
+        '活動内容', '活動紹介', '事業内容', '実施事業',
+        # 募集・申請関連
+        '募集', '公募', '申請', '応募', '募集中', '受付中',
+        # 情報関連
+        'お知らせ', 'ニュース', '新着情報', 'トピックス',
+        # その他
+        '活動案内', 'program', 'grant', 'support', 'funding'
+    ]
+    
+    async def fallback_from_homepage(
+        self, 
+        grant_name: str, 
+        max_depth: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        ファイルが見つからない場合のFallback: 組織の公式サイトトップから探索する。
+        
+        処理フロー:
+        1. 助成金名から組織名を抽出
+        2. Google検索で組織の公式サイトトップページを特定
+        3. トップページから「申請」「公募」「助成」リンクを優先的に辿る
+        4. 最大3階層まで探索してファイルを収集
+        
+        Args:
+            grant_name: 助成金名
+            max_depth: 最大探索階層（デフォルト3）
+            
+        Returns:
+            見つかったファイル情報のリスト
+        """
+        from src.tools.site_explorer import SiteExplorer
+        from src.logic.grant_validator import GrantValidator
+        
+        self.logger.info(f"[GRANT_SCRAPER] Starting homepage fallback for: {grant_name}")
+        
+        # 1. 組織名を抽出
+        validator = GrantValidator()
+        organization_name = validator.extract_organization_name(grant_name)
+        
+        if not organization_name:
+            self.logger.warning("[GRANT_SCRAPER] Could not extract organization name from grant name")
+            return []
+        
+        self.logger.info(f"[GRANT_SCRAPER] Extracted organization: {organization_name}")
+        
+        # 2. ホームページURLを検索
+        homepage_url = await self._find_homepage_url(organization_name)
+        
+        if not homepage_url:
+            self.logger.warning(f"[GRANT_SCRAPER] Could not find homepage for: {organization_name}")
+            return []
+        
+        self.logger.info(f"[GRANT_SCRAPER] Found homepage: {homepage_url}")
+        
+        # 3. ホームページからナビゲーションを辿る
+        found_files = []
+        
+        async with SiteExplorer(headless=True, timeout=self.timeout) as explorer:
+            grant_page_url, files = await self._navigate_to_grant_page(
+                homepage_url, grant_name, explorer, max_depth
+            )
+            
+            if files:
+                self.logger.info(f"[GRANT_SCRAPER] Homepage fallback found {len(files)} files")
+                found_files.extend(files)
+            else:
+                self.logger.info("[GRANT_SCRAPER] Homepage fallback did not find any files")
+        
+        return found_files
+    
+    async def _find_homepage_url(self, organization_name: str) -> Optional[str]:
+        """
+        組織名からトップページURLを検索・特定する。
+        
+        Args:
+            organization_name: 組織名
+            
+        Returns:
+            ホームページURL（見つからない場合はNone）
+        """
+        if not self.gemini_client:
+            self.logger.warning("[GRANT_SCRAPER] Gemini client not available for homepage search")
+            return None
+        
+        try:
+            from google.genai.types import GenerateContentConfig, Tool, GoogleSearch
+            
+            # Google検索でホームページを探す
+            search_prompt = f"""
+以下の組織の公式ウェブサイトのトップページURLを特定してください。
+
+組織名: {organization_name}
+
+出力形式:
+URL: [公式サイトのトップページURL]
+
+注意:
+- 公式サイトのみを回答してください
+- Wikipediaや第三者のサイトは避けてください
+- .go.jp, .or.jp, .jp, .org などの信頼できるドメインを優先
+"""
+            
+            google_search_tool = Tool(google_search=GoogleSearch())
+            
+            response = self.gemini_client.models.generate_content(
+                model=self.model_name,
+                contents=search_prompt,
+                config=GenerateContentConfig(
+                    tools=[google_search_tool],
+                    temperature=0.1
+                )
+            )
+            
+            # レスポンスからURLを抽出
+            response_text = response.text
+            
+            # URL: パターンで抽出
+            import re
+            url_match = re.search(r'URL:\s*(https?://[^\s\n]+)', response_text)
+            if url_match:
+                url = url_match.group(1).strip().rstrip('/')
+                return url
+            
+            # 直接URLパターンで抽出（バックアップ）
+            url_pattern = r'https?://[^\s<>"\')\]]+(?:\.go\.jp|\.or\.jp|\.org|\.jp)[^\s<>"\')\]]*'
+            matches = re.findall(url_pattern, response_text)
+            if matches:
+                # 最も短い（トップページらしい）URLを返す
+                return min(matches, key=len).rstrip('/')
+            
+            self.logger.warning(f"[GRANT_SCRAPER] Could not extract URL from response: {response_text[:200]}")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"[GRANT_SCRAPER] Homepage search failed: {e}")
+            return None
+    
+    async def _navigate_to_grant_page(
+        self, 
+        homepage_url: str,
+        grant_name: str,
+        explorer: Any,
+        max_depth: int = 3
+    ) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+        """
+        トップページからナビゲーションを辿って助成金ページ・ファイル一覧ページに到達する。
+        
+        Args:
+            homepage_url: ホームページURL
+            grant_name: 助成金名（関連性判定用）
+            explorer: SiteExplorerインスタンス
+            max_depth: 最大探索階層
+            
+        Returns:
+            (到達したページURL, 見つかったファイルリスト)
+        """
+        visited_urls = set()
+        urls_to_visit = [(homepage_url, 0)]  # (url, depth)
+        all_found_files = []
+        best_grant_page_url = None
+        best_grant_page_score = 0
+        
+        while urls_to_visit:
+            current_url, depth = urls_to_visit.pop(0)
+            
+            if current_url in visited_urls or depth > max_depth:
+                continue
+            
+            visited_urls.add(current_url)
+            self.logger.info(f"[GRANT_SCRAPER] Navigating (depth {depth}): {current_url}")
+            
+            try:
+                page = await explorer.access_page(current_url)
+                if not page:
+                    continue
+                
+                # ページタイトルを取得
+                page_info = await explorer.get_page_info(page)
+                title = page_info.get('title', '')
+                
+                # リンクを抽出
+                all_links = await explorer.extract_links(page)
+                
+                # ファイルを探す
+                format_files = await self._find_format_files(all_links, page, grant_name)
+                
+                if format_files:
+                    for f in format_files:
+                        f['found_at'] = current_url
+                        f['navigation_depth'] = depth
+                    all_found_files.extend(format_files)
+                    self.logger.info(f"[GRANT_SCRAPER] Found {len(format_files)} files at depth {depth}")
+                
+                # このページが助成金ページかどうかスコアリング
+                page_score = self._score_grant_page(title, grant_name)
+                if page_score > best_grant_page_score:
+                    best_grant_page_score = page_score
+                    best_grant_page_url = current_url
+                
+                # 次に探索するリンクを決定
+                if depth < max_depth:
+                    nav_links = self._find_navigation_links(all_links, grant_name)
+                    for link in nav_links[:5]:  # 各ページから最大5リンク
+                        link_url = link.get('href')
+                        if link_url and link_url not in visited_urls:
+                            # 同一ドメインのみ探索
+                            from urllib.parse import urlparse
+                            if urlparse(link_url).netloc == urlparse(homepage_url).netloc:
+                                urls_to_visit.append((link_url, depth + 1))
+                
+                await page.close()
+                
+            except Exception as e:
+                self.logger.warning(f"[GRANT_SCRAPER] Error navigating {current_url}: {e}")
+        
+        # 重複を除去
+        unique_files = {}
+        for f in all_found_files:
+            url = f.get('url')
+            if url and url not in unique_files:
+                unique_files[url] = f
+        
+        return (best_grant_page_url, list(unique_files.values()))
+    
+    def _find_navigation_links(
+        self, 
+        links: List[Dict[str, str]], 
+        grant_name: str = None
+    ) -> List[Dict[str, str]]:
+        """
+        ナビゲーション用のリンクを優先度順に抽出する。
+        
+        Args:
+            links: ページ内のリンクリスト
+            grant_name: 助成金名（関連性判定用）
+            
+        Returns:
+            優先度順にソートされたリンクリスト
+        """
+        scored_links = []
+        
+        for link in links:
+            if link.get('is_file'):
+                continue  # ファイルリンクはスキップ
+            
+            href = link.get('href', '')
+            text = link.get('text', '')
+            
+            if not href or len(text) < 2:
+                continue
+            
+            combined = (href + ' ' + text).lower()
+            score = 0
+            
+            # ナビゲーションキーワードでスコアリング
+            for i, keyword in enumerate(self.HOMEPAGE_NAV_KEYWORDS):
+                if keyword.lower() in combined:
+                    # 早い順のキーワードほど高スコア
+                    score += 20 - (i * 0.5)
+            
+            # 助成金名のキーワードマッチ
+            if grant_name:
+                import re
+                grant_parts = re.split(r'[・\s　]+', grant_name)
+                for part in grant_parts:
+                    if len(part) >= 2 and part.lower() in combined:
+                        score += 15
+            
+            if score > 0:
+                scored_links.append({
+                    **link,
+                    'nav_score': score
+                })
+        
+        # スコア順にソート
+        scored_links.sort(key=lambda x: x.get('nav_score', 0), reverse=True)
+        
+        return scored_links
+    
+    def _score_grant_page(self, title: str, grant_name: str) -> int:
+        """
+        ページが目的の助成金ページかどうかをスコアリングする。
+        
+        Args:
+            title: ページタイトル
+            grant_name: 助成金名
+            
+        Returns:
+            スコア（高いほど関連性が高い）
+        """
+        if not title:
+            return 0
+        
+        title_lower = title.lower()
+        score = 0
+        
+        # 助成金関連キーワード
+        for keyword in ['助成', '補助', '公募', '募集', '申請']:
+            if keyword in title_lower:
+                score += 10
+        
+        # 助成金名のマッチ
+        if grant_name:
+            import re
+            grant_parts = re.split(r'[・\s　]+', grant_name)
+            matches = 0
+            for part in grant_parts:
+                if len(part) >= 2 and part.lower() in title_lower:
+                    matches += 1
+            
+            if matches >= 2:
+                score += 30
+            elif matches >= 1:
+                score += 15
+        
+        return score

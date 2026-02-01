@@ -319,6 +319,249 @@ class VisualAnalyzer:
         finally:
             if os.path.exists(screenshot_path):
                 os.remove(screenshot_path)
+    
+    async def find_file_links_visually(
+        self,
+        page: Any,
+        grant_name: str = None
+    ) -> List[Dict[str, Any]]:
+        """
+        スクリーンショットからファイルダウンロードリンクを視覚的に探す。
+        DOM分析で見つからない場合のFallback機能。
+        
+        Args:
+            page: Playwright page object
+            grant_name: 助成金名（関連性判定用、オプション）
+            
+        Returns:
+            見つかったファイルリンクのリスト。各要素は以下の情報を含む:
+            - text: リンクテキスト
+            - click_coordinates: クリック座標 (x, y)
+            - confidence: 信頼度 (high/medium/low)
+            - file_type: 推定ファイル形式 (pdf/word/excel/unknown)
+            - position: 画面内の位置説明
+        """
+        import tempfile
+        import json
+        import re
+        
+        if not self.client:
+            self.logger.warning("[VISUAL_ANALYZER] No Gemini client available")
+            return []
+        
+        # Take screenshot
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            screenshot_path = tmp.name
+        
+        try:
+            await page.screenshot(path=screenshot_path, full_page=False)
+            
+            # Get viewport size for coordinate validation
+            viewport_size = await page.evaluate('() => ({ width: window.innerWidth, height: window.innerHeight })')
+            
+            # Build prompt
+            prompt = self._build_file_link_detection_prompt(grant_name, viewport_size)
+            
+            # Encode image
+            image_base64 = self._encode_image_to_base64(screenshot_path)
+            if not image_base64:
+                return []
+            
+            from google.genai.types import GenerateContentConfig, Part, Content
+            
+            # Create image part
+            image_part = Part.from_bytes(
+                data=base64.b64decode(image_base64),
+                mime_type=self._get_mime_type(screenshot_path)
+            )
+            
+            contents = [
+                Content(parts=[image_part, Part.from_text(prompt)])
+            ]
+            
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config=GenerateContentConfig(
+                    temperature=0.1
+                )
+            )
+            
+            # Parse response
+            found_links = self._parse_file_links_response(response.text, viewport_size)
+            
+            self.logger.info(f"[VISUAL_ANALYZER] Found {len(found_links)} file links visually")
+            return found_links
+            
+        except Exception as e:
+            self.logger.error(f"[VISUAL_ANALYZER] find_file_links_visually failed: {e}")
+            return []
+            
+        finally:
+            if os.path.exists(screenshot_path):
+                os.remove(screenshot_path)
+    
+    def _build_file_link_detection_prompt(
+        self, 
+        grant_name: str = None,
+        viewport_size: Dict[str, int] = None
+    ) -> str:
+        """
+        ファイルリンク検出用のVLMプロンプトを構築する。
+        
+        Args:
+            grant_name: 助成金名（関連性判定用）
+            viewport_size: ビューポートサイズ
+            
+        Returns:
+            VLMプロンプト文字列
+        """
+        width = viewport_size.get('width', 1280) if viewport_size else 1280
+        height = viewport_size.get('height', 720) if viewport_size else 720
+        
+        grant_context = ""
+        if grant_name:
+            grant_context = f"""
+**対象助成金:** {grant_name}
+この助成金に関連するファイル（申請書、様式、募集要項など）を優先的に探してください。
+"""
+        
+        return f"""
+この画面のスクリーンショットを詳細に分析し、ファイルダウンロードリンクを探してください。
+
+{grant_context}
+
+**探すべき要素:**
+1. PDF/Word/Excelのアイコン付きリンク
+2. 「ダウンロード」「様式」「申請書」「フォーマット」などのボタン/リンク
+3. ファイル一覧テーブル内のリンク
+4. アコーディオンやタブ内のリンク（開いている場合）
+5. ファイル拡張子が表示されているテキストリンク
+
+**画像サイズ:** {width} x {height} ピクセル
+
+**出力形式（JSON形式で回答）:**
+```json
+{{
+  "found_count": [見つかったファイルリンクの数],
+  "file_links": [
+    {{
+      "text": "[リンクのテキスト]",
+      "file_type": "[pdf/word/excel/zip/unknown]",
+      "x": [クリック座標X（0-{width}）],
+      "y": [クリック座標Y（0-{height}）],
+      "confidence": "[high/medium/low]",
+      "position": "[画面内の位置説明]",
+      "reason": "[このリンクがファイルだと判断した理由]"
+    }}
+  ]
+}}
+```
+
+**重要な注意:**
+- 座標は画像の左上を原点(0,0)としたピクセル値で指定
+- リンクの中心付近の座標を推定してください
+- 見つからない場合は found_count: 0 で空の配列を返してください
+- 必ず有効なJSON形式で回答してください
+"""
+    
+    def _parse_file_links_response(
+        self, 
+        response_text: str,
+        viewport_size: Dict[str, int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        VLMレスポンスからファイルリンク情報をパースする。
+        
+        Args:
+            response_text: VLMレスポンステキスト
+            viewport_size: ビューポートサイズ（座標検証用）
+            
+        Returns:
+            パースされたファイルリンクのリスト
+        """
+        import json
+        import re
+        
+        found_links = []
+        
+        try:
+            # JSONブロックを抽出
+            json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response_text)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # JSONブロックがない場合、レスポンス全体をJSONとしてパース試行
+                json_str = response_text.strip()
+            
+            data = json.loads(json_str)
+            
+            file_links = data.get('file_links', [])
+            
+            width = viewport_size.get('width', 1280) if viewport_size else 1280
+            height = viewport_size.get('height', 720) if viewport_size else 720
+            
+            for link in file_links:
+                # 座標の検証
+                x = link.get('x', 0)
+                y = link.get('y', 0)
+                
+                # 範囲外の座標を補正
+                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                    x = max(0, min(int(x), width))
+                    y = max(0, min(int(y), height))
+                else:
+                    continue  # 無効な座標はスキップ
+                
+                found_links.append({
+                    'text': link.get('text', 'Unknown'),
+                    'file_type': link.get('file_type', 'unknown'),
+                    'click_coordinates': {'x': x, 'y': y},
+                    'confidence': link.get('confidence', 'low'),
+                    'position': link.get('position', ''),
+                    'reason': link.get('reason', ''),
+                    'source': 'visual_analysis'
+                })
+                
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"[VISUAL_ANALYZER] Failed to parse JSON response: {e}")
+            # フォールバック: テキストから手動でパース
+            found_links = self._fallback_parse_file_links(response_text)
+        except Exception as e:
+            self.logger.error(f"[VISUAL_ANALYZER] Error parsing file links: {e}")
+        
+        return found_links
+    
+    def _fallback_parse_file_links(self, response_text: str) -> List[Dict[str, Any]]:
+        """
+        JSONパースに失敗した場合のフォールバックパーサー。
+        テキストから手動でファイルリンク情報を抽出する。
+        """
+        import re
+        
+        found_links = []
+        
+        # パターンマッチで情報を抽出
+        # "text": "xxx" パターン
+        text_matches = re.findall(r'"text"\s*:\s*"([^"]+)"', response_text)
+        coord_matches = re.findall(r'"x"\s*:\s*(\d+)[,\s]+"y"\s*:\s*(\d+)', response_text)
+        type_matches = re.findall(r'"file_type"\s*:\s*"([^"]+)"', response_text)
+        
+        # マッチした情報を組み合わせ
+        for i, text in enumerate(text_matches):
+            link = {
+                'text': text,
+                'file_type': type_matches[i] if i < len(type_matches) else 'unknown',
+                'source': 'visual_analysis_fallback'
+            }
+            
+            if i < len(coord_matches):
+                x, y = coord_matches[i]
+                link['click_coordinates'] = {'x': int(x), 'y': int(y)}
+            
+            found_links.append(link)
+        
+        return found_links
 
 
 # Singleton for easy access
