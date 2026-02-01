@@ -1,12 +1,10 @@
 #!/bin/bash
-
 # Configuration
 PROJECT_ID="zenn-shadow-director"
 SERVICE_NAME="shadow-director-bot"
 REGION="us-central1"
 IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME"
 GCS_BUCKET="zenn-shadow-director-data"
-
 # Load secrets from .env file (if it exists) to get DISCORD_BOT_TOKEN
 if [ -f .env ]; then
     echo "Loading secrets from .env file..."

@@ -10,6 +10,8 @@ from src.logic.grant_page_scraper import GrantPageScraper
 from src.logic.format_field_mapper import FormatFieldMapper
 from src.tools.document_filler import DocumentFiller
 from src.logic.file_classifier import FileClassifier
+from src.logic.competitive_analyzer import CompetitiveAnalyzer
+from src.agents.critic import CriticAgent
 
 class DrafterAgent:
     def __init__(self):
@@ -50,6 +52,10 @@ class DrafterAgent:
         # Initialize file classifier for early filtering
         vlm_model = self.config.get("model_config", {}).get("vlm_model", "gemini-3-flash-preview")
         self.file_classifier = FileClassifier(self.client, vlm_model)
+        
+        # Initialize competitive analyzer and critic agent for adversarial evaluation
+        self.competitive_analyzer = CompetitiveAnalyzer()
+        self.critic_agent = CriticAgent()
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -812,18 +818,55 @@ class DrafterAgent:
             else:
                 logging.info("[DRAFTER] Format analysis returned empty, using format_info only")
         
-        # Step 3: Generate draft based on format and analysis
-        logging.info(f"[DRAFTER] Step 3: Generating format-aware draft")
+        # Step 2.5: Competitive Intelligence - Analyze past winners and generate strategy
+        logging.info(f"[DRAFTER] Step 2.5: Running competitive analysis")
+        competitive_insight = ""
+        strategy_adjustment = ""
+        
+        # Create progress callback for Discord notifications
+        def competitive_progress_callback(msg: str):
+            notifier.notify_sync(ProgressStage.ANALYZING, msg)
+        
+        try:
+            competitive_result = self.competitive_analyzer.analyze_competitors(
+                grant_name=grant_name,
+                profile=profile,
+                progress_callback=competitive_progress_callback
+            )
+            
+            if competitive_result:
+                competitive_insight = competitive_result.winning_patterns
+                strategy_adjustment = competitive_result.tone_adjustment
+                logging.info(f"[DRAFTER] Competitive analysis completed. Win probability: {competitive_result.win_probability}%")
+        except Exception as comp_error:
+            logging.warning(f"[DRAFTER] Competitive analysis failed: {comp_error}")
+            notifier.notify_sync(
+                ProgressStage.PROCESSING,
+                f"⚠️ 競合調査をスキップして続行します..."
+            )
+        
+        # Step 3: Generate draft based on format and analysis (with strategy adjustment)
+        logging.info(f"[DRAFTER] Step 3: Generating format-aware draft with strategy")
         
         notifier.notify_sync(
             ProgressStage.PROCESSING,
-            f"📝 [{grant_display_name}] ドラフトを生成中..."
+            f"📝 [{grant_display_name}] 戦略を反映してドラフトを生成中..."
         )
         
         # Combine format_info and format_analysis for comprehensive context
         combined_format_info = format_info
         if format_analysis:
             combined_format_info += f"\n\n---\n\n# 申請フォーマット詳細解析結果\n{format_analysis}"
+        
+        # Add strategy adjustment if available
+        strategy_section = ""
+        if strategy_adjustment:
+            strategy_section = f"""
+# 🎯 競合調査による戦略提案
+{strategy_adjustment}
+
+**上記の戦略を反映して、申請書を作成してください。**
+"""
         
         full_prompt = f"""
 {self.system_prompt}
@@ -836,7 +879,7 @@ class DrafterAgent:
 
 # 申請書フォーマット情報
 {combined_format_info}
-
+{strategy_section}
 # タスク
 上記の申請書フォーマット（特に「申請フォーマット詳細解析結果」の質問項目）に従って、各質問項目に対する回答を作成してください。
 
@@ -846,6 +889,7 @@ class DrafterAgent:
 3. Soul Profileの情報を最大限活用
 4. 各回答の後に簡単な📝記入のポイントを追記
 5. 審査で重視される点を意識して回答を作成
+6. 競合調査の戦略提案がある場合は必ず反映
 
 **出力形式:**
 # [助成金名] 申請書ドラフト
@@ -876,8 +920,43 @@ class DrafterAgent:
                 model=self.model_name,
                 contents=full_prompt
             )
-            draft_content = response.text
-            logging.info(f"[DRAFTER] Draft generated, length: {len(draft_content)} chars")
+            initial_draft_content = response.text
+            logging.info(f"[DRAFTER] Initial draft generated, length: {len(initial_draft_content)} chars")
+            
+            # Step 3.5: Adversarial Evaluation Loop (Writer-Critic)
+            logging.info(f"[DRAFTER] Step 3.5: Starting adversarial evaluation loop")
+            
+            # Create progress callback for revision loop
+            def revision_progress_callback(msg: str):
+                notifier.notify_sync(ProgressStage.PROCESSING, msg)
+            
+            try:
+                revision_result = self.critic_agent.run_revision_loop(
+                    initial_draft=initial_draft_content,
+                    evaluation_criteria=combined_format_info,
+                    grant_name=grant_name,
+                    profile=profile,
+                    competitive_insight=competitive_insight,
+                    max_iterations=3,
+                    pass_threshold=80,
+                    progress_callback=revision_progress_callback
+                )
+                
+                # Use the best draft from revision loop
+                draft_content = revision_result.final_draft
+                logging.info(f"[DRAFTER] Revision loop completed. Iterations: {revision_result.iterations}, Final score: {revision_result.final_score}, Passed: {revision_result.passed}")
+                
+                # Format dialogue log for message
+                dialogue_log_text = self.critic_agent.format_dialogue_log(revision_result.dialogue_log)
+                
+            except Exception as revision_error:
+                logging.warning(f"[DRAFTER] Revision loop failed, using initial draft: {revision_error}")
+                draft_content = initial_draft_content
+                dialogue_log_text = ""
+                notifier.notify_sync(
+                    ProgressStage.PROCESSING,
+                    f"⚠️ 推敲ループをスキップして続行します..."
+                )
             
             # Extract a title (first line or generic)
             lines = draft_content.split('\n')
@@ -910,6 +989,10 @@ class DrafterAgent:
             logging.info(f"[DRAFTER] Filename: {filename}")
             
             message = f"ドラフトを作成しました: {file_path}"
+            
+            # Add dialogue log to message if available
+            if dialogue_log_text:
+                message += f"\n\n{dialogue_log_text}"
             
             # Step 4: Fill format files with draft content (field-by-field processing)
             filled_files = []
@@ -949,11 +1032,13 @@ class DrafterAgent:
                         
                         # Fill fields individually using profile (field-by-field processing)
                         # Note: No Discord notification per field - progress is logged only
+                        # draft_contentには推敲ループ後の改善されたドラフトが含まれる
                         field_values = self.format_mapper.fill_fields_individually(
                             fields=fields,
                             profile=profile,
                             grant_name=grant_name,
-                            grant_info=grant_info
+                            grant_info=grant_info,
+                            refined_draft=draft_content  # 推敲後のドラフトを参照情報として渡す
                         )
                         
                         if not field_values:
@@ -990,15 +1075,8 @@ class DrafterAgent:
                         message += f"\n\n{concern_report}"
                         logging.info(f"[DRAFTER] Generated concern report")
                     
-                    # 事務局長レビューを生成
-                    director_review = self._generate_director_review(
-                        grant_name=grant_name,
-                        field_values=all_field_values,
-                        profile=profile
-                    )
-                    if director_review:
-                        message += f"\n\n{director_review}"
-                        logging.info(f"[DRAFTER] Generated director review")
+                    # Note: 事務局長レビューはCritic Agentの推敲ループに統合されました
+                    # 最終評価結果はdialogue_log_textに含まれています
             
             # Completion notification
             notifier.notify_sync(
@@ -1146,115 +1224,6 @@ class DrafterAgent:
         except Exception as e:
             return (f"ドラフト取得エラー: {e}", None)
 
-    def _generate_director_review(
-        self, 
-        grant_name: str, 
-        field_values: Dict[str, Any],
-        profile: str
-    ) -> str:
-        """
-        事務局長の観点からドラフトをレビューし、詳細なコメントを生成する（強化版）。
-        
-        Args:
-            grant_name: 助成金名
-            field_values: 入力されたフィールド値
-            profile: NPOプロファイル
-            
-        Returns:
-            Markdown形式の事務局長レビュー（採択可能性評価付き）
-        """
-        if not self.client or not field_values:
-            return ""
-        
-        try:
-            # フィールド値をテキスト化（懸念点情報も含む）
-            fields_with_concerns = []
-            concern_count = 0
-            
-            for fid, data in field_values.items():
-                if not data.get('value'):
-                    continue
-                    
-                field_name = data.get('field_name', fid)
-                value = data.get('value', '')[:300]
-                concern = data.get('concern_type', 'none')
-                
-                if concern != 'none':
-                    concern_count += 1
-                    fields_with_concerns.append(
-                        f"- **{field_name}**: {value}... [⚠️ {concern}]"
-                    )
-                else:
-                    fields_with_concerns.append(
-                        f"- **{field_name}**: {value}..." if len(data.get('value', '')) > 300
-                        else f"- **{field_name}**: {value}"
-                    )
-            
-            fields_text = "\n".join(fields_with_concerns[:30])  # 最大30項目
-            
-            prompt = f"""あなたは20年以上のNPO運営経験を持つ事務局長です。
-助成金申請書のドラフトを、審査員の視点も踏まえて厳しくレビューしてください。
-
-# 対象助成金
-{grant_name}
-
-# NPOプロファイル概要
-{profile[:2500]}
-
-# 入力されたドラフト内容（{len(field_values)}項目、うち{concern_count}項目に懸念あり）
-{fields_text}
-
-# レビュー観点（5つの観点で評価）
-
-## 1. 採択可能性の評価
-この申請書が採択される可能性を「高」「中」「低」で評価し、その理由を述べてください。
-
-## 2. 申請書の説得力
-- 団体の強みが伝わっているか
-- 事業の社会的意義が明確か
-- 数値目標や具体性があるか
-
-## 3. 改善すべき具体的な箇所
-最も改善が必要な2-3箇所を具体的に指摘し、どう修正すべきか提案してください。
-
-## 4. 審査員が気にするポイント
-審査員が質問しそうな点、追加情報が必要な点を挙げてください。
-
-## 5. 提出前の確認事項
-団体内で最終確認すべき事項をリストアップしてください。
-
-# 出力形式
-以下の形式でMarkdownで出力してください（合計400-500字程度）:
-
-**採択可能性**: [高/中/低] - [一言理由]
-
-[総評コメント（2-3文で申請書全体の印象）]
-
-**👍 良い点**
-- [ポイント1]
-- [ポイント2]
-
-**⚡ 要改善**
-- [具体的な指摘と改善案1]
-- [具体的な指摘と改善案2]
-
-**✅ 提出前チェック**
-- [確認事項1]
-- [確認事項2]
-"""
-            
-            response = self.client.models.generate_content(
-                model="gemini-3-flash-preview",
-                contents=prompt
-            )
-            
-            review_text = response.text.strip()
-            
-            if review_text:
-                return f"## 📝 事務局長レビュー\n\n{review_text}"
-            
-            return ""
-            
-        except Exception as e:
-            logging.warning(f"[DRAFTER] Director review generation failed: {e}")
-            return ""
+    # Note: _generate_director_review()は廃止されました。
+    # この機能はCriticAgent.run_revision_loop()に統合されています。
+    # 詳細は docs/adversarial_critique_spec.md を参照してください。

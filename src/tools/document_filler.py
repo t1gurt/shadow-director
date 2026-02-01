@@ -156,6 +156,7 @@ class DocumentFiller:
         """
         try:
             import openpyxl
+            from openpyxl.comments import Comment
         except ImportError:
             return None, "openpyxlがインストールされていません"
         
@@ -167,8 +168,21 @@ class DocumentFiller:
             # ファイルを開いて編集
             wb = openpyxl.load_workbook(output_path)
             filled_count = 0
+            concern_count = 0
             
-            for field_id, value in field_values.items():
+            for field_id, field_data in field_values.items():
+                # 新形式と旧形式の両方に対応
+                if isinstance(field_data, dict):
+                    value = field_data.get("value", "")
+                    concern_type = field_data.get("concern_type", "none")
+                    concern_reason = field_data.get("concern_reason", "")
+                    field_name = field_data.get("field_name", field_id)
+                else:
+                    value = field_data
+                    concern_type = "none"
+                    concern_reason = ""
+                    field_name = field_id
+                
                 if not value:
                     continue
                 
@@ -188,8 +202,15 @@ class DocumentFiller:
                         continue
                     
                     sheet = wb[sheet_name]
-                    sheet.cell(row=row, column=col, value=value)
+                    cell = sheet.cell(row=row, column=col, value=value)
                     filled_count += 1
+                    
+                    # 懸念点がある場合はコメントを追加
+                    if concern_type != "none" and concern_reason:
+                        comment_text = self._get_concern_comment_text(concern_type, concern_reason, field_name)
+                        cell.comment = Comment(comment_text, "Shadow Director AI")
+                        concern_count += 1
+                        self.logger.debug(f"[DOC_FILLER] Added comment to {field_id}: {concern_type}")
                     
                 except (ValueError, IndexError) as e:
                     self.logger.warning(f"[DOC_FILLER] Error filling field {field_id}: {e}")
@@ -197,12 +218,16 @@ class DocumentFiller:
             wb.save(output_path)
             wb.close()
             
-            self.logger.info(f"[DOC_FILLER] Filled {filled_count} fields in Excel")
+            self.logger.info(f"[DOC_FILLER] Filled {filled_count} fields in Excel, {concern_count} comments added")
             
             if filled_count == 0:
                 return None, "入力できるフィールドがありませんでした"
             
-            return output_path, f"Excelに{filled_count}項目を入力しました"
+            message = f"Excelに{filled_count}項目を入力しました"
+            if concern_count > 0:
+                message += f"（{concern_count}件の懸念点コメント付き）"
+            
+            return output_path, message
             
         except Exception as e:
             self.logger.error(f"[DOC_FILLER] Excel fill error: {e}")
@@ -229,6 +254,7 @@ class DocumentFiller:
         """
         try:
             from docx import Document
+            from docx.shared import Pt, RGBColor
         except ImportError:
             return None, "python-docxがインストールされていません"
         
@@ -240,6 +266,13 @@ class DocumentFiller:
             # ファイルを開いて編集
             doc = Document(output_path)
             filled_count = 0
+            concern_count = 0
+            
+            # コメント用のパーツを初期化
+            self._init_comments_part(doc)
+            
+            # 懸念点があるフィールドの情報を蓄積（コメント追加用）
+            concerns_to_add = []
             
             for field_id, field_data in field_values.items():
                 # 新形式と旧形式の両方に対応
@@ -248,46 +281,93 @@ class DocumentFiller:
                     input_pattern = field_data.get("input_pattern", "inline")
                     location = field_data.get("location", {})
                     input_length_type = field_data.get("input_length_type", "unknown")
+                    concern_type = field_data.get("concern_type", "none")
+                    concern_reason = field_data.get("concern_reason", "")
+                    field_name = field_data.get("field_name", field_id)
                 else:
                     # 旧形式（文字列のみ）
                     value = field_data
                     input_pattern = "inline"
                     location = {}
                     input_length_type = "unknown"
+                    concern_type = "none"
+                    concern_reason = ""
+                    field_name = field_id
                 
                 if not value:
                     continue
                 
+                # 懸念点がある場合は後でコメントを追加
+                has_concern = concern_type != "none" and concern_reason
+                
                 try:
+                    filled = False
+                    target_paragraph = None
+                    
                     if field_id.startswith("table"):
                         # テーブルセル: "tableN_行_列" - input_length_typeを考慮
-                        filled = self._fill_word_table_cell(doc, field_id, value, input_length_type)
+                        filled, target_paragraph = self._fill_word_table_cell_with_para(doc, field_id, value, input_length_type)
                     elif field_id.startswith("para_"):
                         # 段落: "para_N" - 入力パターン情報を使用
-                        filled = self._fill_word_paragraph_with_pattern(doc, field_id, value, input_pattern, location)
+                        filled, target_paragraph = self._fill_word_paragraph_with_pattern_and_para(doc, field_id, value, input_pattern, location)
                     else:
                         self.logger.warning(f"[DOC_FILLER] Unknown field_id format: {field_id}")
-                        filled = False
                     
                     if filled:
                         filled_count += 1
                         self.logger.debug(f"[DOC_FILLER] Filled {field_id} with pattern '{input_pattern}'")
                         
+                        # 懸念点がある場合、コメント追加対象としてリストに追加
+                        if has_concern and target_paragraph is not None:
+                            concern_count += 1
+                            concerns_to_add.append({
+                                "paragraph": target_paragraph,
+                                "field_name": field_name,
+                                "concern_type": concern_type,
+                                "concern_reason": concern_reason
+                            })
+                        
                 except Exception as e:
                     self.logger.warning(f"[DOC_FILLER] Error filling field {field_id}: {e}")
             
+            # 懸念点コメントを追加
+            for idx, concern in enumerate(concerns_to_add):
+                try:
+                    comment_text = self._get_concern_comment_text(
+                        concern["concern_type"], 
+                        concern["concern_reason"], 
+                        concern["field_name"]
+                    )
+                    self._add_word_native_comment(
+                        doc, 
+                        concern["paragraph"], 
+                        comment_text, 
+                        idx
+                    )
+                except Exception as e:
+                    self.logger.warning(f"[DOC_FILLER] Failed to add comment: {e}")
+            
             doc.save(output_path)
             
-            self.logger.info(f"[DOC_FILLER] Filled {filled_count} fields in Word")
+            # コメントをZIPファイルに注入（python-docxの制限を回避）
+            if concerns_to_add and hasattr(doc, '_comments_element'):
+                self._inject_comments_to_docx(output_path, doc._comments_element)
+            
+            self.logger.info(f"[DOC_FILLER] Filled {filled_count} fields in Word, {concern_count} comments added")
             
             if filled_count == 0:
                 return None, "入力できるフィールドがありませんでした"
             
-            return output_path, f"Wordに{filled_count}項目を入力しました"
+            message = f"Wordに{filled_count}項目を入力しました"
+            if concern_count > 0:
+                message += f"（{concern_count}件のコメント付き）"
+            
+            return output_path, message
             
         except Exception as e:
             self.logger.error(f"[DOC_FILLER] Word fill error: {e}")
             return None, f"Word入力エラー: {e}"
+
     
     def _fill_word_table_cell(self, doc, field_id: str, value: str, input_length_type: str = "unknown") -> bool:
         """
@@ -579,3 +659,555 @@ class DocumentFiller:
                         
         except Exception as e:
             self.logger.warning(f"[DOC_FILLER] Cleanup error: {e}")
+    
+    def _get_concern_comment_text(self, concern_type: str, concern_reason: str, field_name: str) -> str:
+        """
+        懸念点タイプに応じたコメントテキストを生成する。
+        
+        Args:
+            concern_type: 懸念点タイプ（missing_info, uncertain, length_exceeded, truncated）
+            concern_reason: 懸念点の理由
+            field_name: フィールド名
+            
+        Returns:
+            コメントテキスト
+        """
+        type_labels = {
+            "missing_info": "⚠️ 情報不足",
+            "uncertain": "❓ 要確認",
+            "length_exceeded": "📏 文字数超過",
+            "truncated": "✂️ 回答省略"
+        }
+        
+        type_label = type_labels.get(concern_type, "⚠️ 懸念あり")
+        
+        comment = f"""【{type_label}】
+項目: {field_name}
+理由: {concern_reason}
+
+※ 内容をご確認のうえ、必要に応じて修正してください。
+(自動生成: Shadow Director AI)"""
+        
+        return comment
+    
+    def _add_word_concerns_section(self, doc, concerns_list: list):
+        """
+        Wordドキュメント末尾に懸念点一覧セクションを追加する。
+        
+        Args:
+            doc: Wordドキュメント
+            concerns_list: 懸念点情報のリスト
+        """
+        try:
+            from docx.shared import Pt, RGBColor
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+        except ImportError:
+            self.logger.warning("[DOC_FILLER] Failed to import docx components for concerns section")
+            return
+        
+        try:
+            # 区切り線として空白行を追加
+            doc.add_paragraph("")
+            doc.add_paragraph("─" * 40)
+            
+            # タイトル段落
+            title_para = doc.add_paragraph()
+            title_run = title_para.add_run("📋 Shadow Director AI - 懸念点一覧")
+            title_run.bold = True
+            title_run.font.size = Pt(12)
+            
+            # 説明
+            desc_para = doc.add_paragraph()
+            desc_run = desc_para.add_run("以下の項目については、内容をご確認のうえ必要に応じて修正してください。")
+            desc_run.font.size = Pt(10)
+            desc_run.font.color.rgb = RGBColor(100, 100, 100)
+            
+            # 懸念点リスト
+            type_labels = {
+                "missing_info": "⚠️ 情報不足",
+                "uncertain": "❓ 要確認",
+                "length_exceeded": "📏 文字数超過",
+                "truncated": "✂️ 回答省略"
+            }
+            
+            for concern in concerns_list:
+                number = concern["number"]
+                field_name = concern["field_name"]
+                concern_type = concern["concern_type"]
+                concern_reason = concern["concern_reason"]
+                
+                type_label = type_labels.get(concern_type, "⚠️ 懸念あり")
+                
+                item_para = doc.add_paragraph()
+                item_run = item_para.add_run(f"[※{number}] 【{type_label}】{field_name}")
+                item_run.bold = True
+                item_run.font.size = Pt(10)
+                
+                reason_para = doc.add_paragraph()
+                reason_run = reason_para.add_run(f"    → {concern_reason}")
+                reason_run.font.size = Pt(9)
+                reason_run.font.color.rgb = RGBColor(80, 80, 80)
+            
+            # フッター
+            doc.add_paragraph("")
+            footer_para = doc.add_paragraph()
+            footer_run = footer_para.add_run("※ この懸念点一覧は提出前に削除してください。")
+            footer_run.font.size = Pt(8)
+            footer_run.font.color.rgb = RGBColor(150, 150, 150)
+            footer_run.italic = True
+            
+            self.logger.info(f"[DOC_FILLER] Added concerns section with {len(concerns_list)} items")
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Failed to add concerns section: {e}")
+    
+    def _init_comments_part(self, doc):
+        """
+        ドキュメントにコメントパーツを初期化する。
+        python-docxは標準でcomments.xmlを作成しないため、OOXMLで追加する。
+        """
+        try:
+            from docx.opc.constants import RELATIONSHIP_TYPE as RT
+            from docx.parts.document import DocumentPart
+            
+            # コメントパーツが既に存在するかチェック
+            document_part = doc.part
+            
+            # comments関係を探す
+            for rel in document_part.rels.values():
+                if 'comments' in rel.reltype:
+                    self.logger.debug("[DOC_FILLER] Comments part already exists")
+                    return
+            
+            self.logger.debug("[DOC_FILLER] Comments part initialized (will be created on save if needed)")
+            
+        except Exception as e:
+            self.logger.debug(f"[DOC_FILLER] Comments part init skipped: {e}")
+    
+    def _add_word_native_comment(self, doc, paragraph, comment_text: str, comment_id: int):
+        """
+        Wordドキュメントにネイティブコメントを追加する（OOXML直接操作）。
+        
+        Args:
+            doc: Wordドキュメント
+            paragraph: コメントを追加する段落
+            comment_text: コメントテキスト
+            comment_id: コメントID（0から始まる連番）
+        """
+        try:
+            from docx.oxml.ns import qn, nsmap
+            from docx.oxml import OxmlElement
+            from datetime import datetime
+            
+            # Word namespace
+            w_ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+            
+            # コメントIDを文字列に
+            cid = str(comment_id)
+            
+            # 段落にコメント参照マーカーを追加
+            # commentRangeStart要素を作成
+            comment_range_start = OxmlElement('w:commentRangeStart')
+            comment_range_start.set(qn('w:id'), cid)
+            
+            # commentRangeEnd要素を作成
+            comment_range_end = OxmlElement('w:commentRangeEnd')
+            comment_range_end.set(qn('w:id'), cid)
+            
+            # commentReference要素を作成（直接段落に追加しない、別runに入れる）
+            comment_ref_run = OxmlElement('w:r')
+            comment_ref = OxmlElement('w:commentReference')
+            comment_ref.set(qn('w:id'), cid)
+            comment_ref_run.append(comment_ref)
+            
+            # 段落の最初と最後にマーカーを挿入
+            para_element = paragraph._p
+            
+            # 段落の最初にcommentRangeStartを挿入
+            if para_element[0] is not None:
+                para_element.insert(0, comment_range_start)
+            else:
+                para_element.append(comment_range_start)
+            
+            # 段落の最後にcommentRangeEndとcommentReferenceを追加
+            para_element.append(comment_range_end)
+            para_element.append(comment_ref_run)
+            
+            # comments.xmlにコメント本体を追加
+            self._add_comment_to_comments_part(doc, cid, comment_text)
+            
+            self.logger.debug(f"[DOC_FILLER] Added native comment {cid} to paragraph")
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Failed to add native comment: {e}")
+            # フォールバック: 段落末尾にコメントテキストを追加
+            try:
+                from docx.shared import Pt, RGBColor
+                run = paragraph.add_run(f" [※コメント: {comment_text[:50]}...]")
+                run.font.size = Pt(8)
+                run.font.color.rgb = RGBColor(128, 128, 128)
+                run.italic = True
+            except:
+                pass
+    
+    def _add_comment_to_comments_part(self, doc, comment_id: str, comment_text: str):
+        """
+        comments.xmlにコメント本体を追加する。
+        
+        Args:
+            doc: Wordドキュメント
+            comment_id: コメントID
+            comment_text: コメントテキスト
+        """
+        try:
+            from docx.oxml.ns import qn
+            from docx.oxml import OxmlElement
+            from datetime import datetime
+            from lxml import etree
+            
+            document_part = doc.part
+            
+            # comments要素を取得または作成
+            comments_element = self._get_or_create_comments_element(doc)
+            if comments_element is None:
+                self.logger.warning("[DOC_FILLER] Could not get/create comments element")
+                return
+            
+            # コメント要素を作成
+            comment = OxmlElement('w:comment')
+            comment.set(qn('w:id'), comment_id)
+            comment.set(qn('w:author'), 'Shadow Director AI')
+            comment.set(qn('w:date'), datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
+            comment.set(qn('w:initials'), 'SD')
+            
+            # コメント本文を段落として追加
+            comment_para = OxmlElement('w:p')
+            comment_run = OxmlElement('w:r')
+            comment_text_elem = OxmlElement('w:t')
+            comment_text_elem.text = comment_text
+            comment_run.append(comment_text_elem)
+            comment_para.append(comment_run)
+            comment.append(comment_para)
+            
+            # commentsに追加
+            comments_element.append(comment)
+            
+            self.logger.debug(f"[DOC_FILLER] Added comment {comment_id} to comments.xml")
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Failed to add comment to comments part: {e}")
+    
+    def _get_or_create_comments_element(self, doc):
+        """
+        comments.xmlのルート要素を取得または作成する。
+        """
+        try:
+            from docx.opc.constants import RELATIONSHIP_TYPE as RT
+            from docx.oxml.ns import qn
+            from docx.oxml import OxmlElement
+            from lxml import etree
+            import zipfile
+            import io
+            
+            document_part = doc.part
+            
+            # 既存のコメントパーツを探す
+            for rel in document_part.rels.values():
+                if 'comments' in rel.reltype:
+                    return rel.target_part._element
+            
+            # コメントパーツがない場合は、ドキュメント自体にcommentsを埋め込む方式を試す
+            # (python-docxの制限により、新規パーツ追加は複雑なため)
+            
+            # 代替手段: 属性としてcommentsを保持
+            if not hasattr(doc, '_comments_element'):
+                # 新しいcomments要素を作成
+                comments = OxmlElement('w:comments')
+                doc._comments_element = comments
+            
+            return doc._comments_element
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Failed to get/create comments element: {e}")
+            return None
+    
+    def _fill_word_table_cell_with_para(self, doc, field_id: str, value: str, input_length_type: str = "unknown") -> Tuple[bool, Optional[Any]]:
+        """
+        Wordテーブルセルに入力し、対象の段落を返す。
+        
+        Args:
+            doc: Wordドキュメント
+            field_id: フィールドID（"tableN_行_列"形式）
+            value: 入力値
+            input_length_type: "short"（短文）, "long"（長文）, "unknown"
+            
+        Returns:
+            (成功フラグ, 対象段落)
+        """
+        try:
+            # "tableN_行_列" をパース
+            parts = field_id.split('_')
+            if len(parts) != 3:
+                return False, None
+            
+            table_part = parts[0]  # "tableN"
+            row = int(parts[1])
+            col = int(parts[2])
+            table_idx = int(table_part.replace("table", ""))
+            
+            if table_idx >= len(doc.tables):
+                self.logger.warning(f"[DOC_FILLER] Table {table_idx} not found")
+                return False, None
+            
+            table = doc.tables[table_idx]
+            
+            if row >= len(table.rows):
+                self.logger.warning(f"[DOC_FILLER] Row {row} not found in table {table_idx}")
+                return False, None
+            
+            cells = table.rows[row].cells
+            if col >= len(cells):
+                self.logger.warning(f"[DOC_FILLER] Col {col} not found in table {table_idx}, row {row}")
+                return False, None
+            
+            cell = cells[col]
+            
+            # 長文の場合、テーブルセル内に収まるように処理
+            if input_length_type == "short" and len(value) > 50:
+                value = value[:47] + "..."
+                self.logger.debug(f"[DOC_FILLER] Trimmed long value for short field: {field_id}")
+            
+            # 既存テキストをクリアして新しいテキストを設定
+            target_para = None
+            if cell.paragraphs:
+                para = cell.paragraphs[0]
+                self._clear_and_add_with_style(para, value)
+                target_para = para
+            else:
+                cell.text = value
+                if cell.paragraphs:
+                    target_para = cell.paragraphs[0]
+            
+            return True, target_para
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Table cell fill error: {e}")
+            return False, None
+    
+    def _fill_word_paragraph_with_pattern_and_para(
+        self, 
+        doc, 
+        field_id: str, 
+        value: str, 
+        input_pattern: str,
+        location: Dict[str, Any]
+    ) -> Tuple[bool, Optional[Any]]:
+        """
+        VLMで検出された入力パターンに基づいてWord段落に入力し、段落を返す。
+        
+        Args:
+            doc: Wordドキュメント
+            field_id: フィールドID（"para_N"形式）
+            value: 入力値
+            input_pattern: 入力パターン
+            location: 位置情報
+            
+        Returns:
+            (成功フラグ, 対象段落)
+        """
+        try:
+            import re
+            
+            # パターンに応じた処理
+            para_idx = location.get("paragraph_idx")
+            if para_idx is None:
+                para_idx = int(field_id.replace("para_", ""))
+            
+            if para_idx >= len(doc.paragraphs):
+                self.logger.warning(f"[DOC_FILLER] Paragraph {para_idx} not found")
+                return False, None
+            
+            para = doc.paragraphs[para_idx]
+            original_text = para.text
+            
+            # スタイルを取得
+            style = self._get_existing_font_style(para)
+            
+            # 入力処理（既存の_fill_word_paragraph_with_patternと同様）
+            filled = False
+            
+            if input_pattern == "next_line":
+                para.clear()
+                self._add_run_with_style(para, value, style)
+                filled = True
+            elif input_pattern == "underline":
+                new_text = re.sub(r'[_＿]{2,}', value, original_text)
+                if new_text != original_text:
+                    para.clear()
+                    self._add_run_with_style(para, new_text, style)
+                    filled = True
+                else:
+                    input_pattern = "inline"
+            elif input_pattern == "bracket":
+                new_text = re.sub(r'[(（]\s*[　\s]*[)）]', f'（{value}）', original_text)
+                if new_text != original_text:
+                    para.clear()
+                    self._add_run_with_style(para, new_text, style)
+                    filled = True
+                else:
+                    new_text = re.sub(r'[(（][^)）]+[)）]', f'（{value}）', original_text)
+                    if new_text != original_text:
+                        para.clear()
+                        self._add_run_with_style(para, new_text, style)
+                        filled = True
+                    else:
+                        input_pattern = "inline"
+            
+            if input_pattern == "inline":
+                colon_match = re.match(r'^(.+?[:：])\s*(.*)$', original_text)
+                if colon_match:
+                    prefix = colon_match.group(1)
+                    new_text = f"{prefix} {value}"
+                    para.clear()
+                    self._add_run_with_style(para, new_text, style)
+                    filled = True
+                else:
+                    self._add_run_with_style(para, f" {value}", style)
+                    filled = True
+            
+            if not filled:
+                # フォールバック
+                success = self._fill_word_paragraph(doc, field_id, value)
+                return success, para if success else None
+            
+            return filled, para
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Pattern-based paragraph fill error: {e}")
+            return False, None
+    
+    def _inject_comments_to_docx(self, docx_path: str, comments_element):
+        """
+        保存後のdocxファイルにcomments.xmlを注入する。
+        
+        python-docxはcomments.xmlを保存しないため、ZIPファイル操作で挿入する。
+        
+        Args:
+            docx_path: 保存済みのdocxファイルパス
+            comments_element: コメント要素（w:comments）
+        """
+        try:
+            import zipfile
+            import tempfile
+            from lxml import etree
+            
+            # コメントがない場合はスキップ
+            if len(comments_element) == 0:
+                self.logger.debug("[DOC_FILLER] No comments to inject")
+                return
+            
+            # 一時ファイルを作成
+            temp_path = docx_path + ".tmp"
+            
+            # XMLのシリアライズ
+            # commentsのXMLには名前空間宣言が必要
+            comments_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+"""
+            for comment in comments_element:
+                comments_xml += etree.tostring(comment, encoding='unicode')
+            comments_xml += "</w:comments>"
+            
+            # 既存のdocxを読み込んで新しいファイルに書き出し
+            with zipfile.ZipFile(docx_path, 'r') as zin:
+                with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zout:
+                    for item in zin.infolist():
+                        if item.filename == 'word/_rels/document.xml.rels':
+                            # リレーションシップファイルにコメント参照を追加
+                            content = zin.read(item.filename).decode('utf-8')
+                            content = self._add_comments_relationship(content)
+                            zout.writestr(item, content.encode('utf-8'))
+                        elif item.filename == '[Content_Types].xml':
+                            # Content_Typesにコメントタイプを追加
+                            content = zin.read(item.filename).decode('utf-8')
+                            content = self._add_comments_content_type(content)
+                            zout.writestr(item, content.encode('utf-8'))
+                        else:
+                            # その他のファイルはそのままコピー
+                            zout.writestr(item, zin.read(item.filename))
+                    
+                    # comments.xmlを追加
+                    zout.writestr('word/comments.xml', comments_xml.encode('utf-8'))
+            
+            # 元のファイルを置き換え
+            import os
+            os.replace(temp_path, docx_path)
+            
+            self.logger.info(f"[DOC_FILLER] Injected {len(comments_element)} comments to docx")
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Failed to inject comments: {e}")
+            # 一時ファイルがあれば削除
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except:
+                pass
+    
+    def _add_comments_relationship(self, rels_content: str) -> str:
+        """
+        document.xml.relsにコメント参照を追加する。
+        """
+        try:
+            from lxml import etree
+            
+            # 既にコメント参照がある場合はスキップ
+            if 'comments.xml' in rels_content:
+                return rels_content
+            
+            # XMLをパース
+            root = etree.fromstring(rels_content.encode('utf-8'))
+            ns = {'r': 'http://schemas.openxmlformats.org/package/2006/relationships'}
+            
+            # 新しいIDを生成（既存のID + 1）
+            existing_ids = [int(r.get('Id').replace('rId', '')) for r in root.findall('.//r:Relationship', ns) if r.get('Id', '').startswith('rId')]
+            new_id = max(existing_ids) + 1 if existing_ids else 1
+            
+            # コメント参照を追加
+            new_rel = etree.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship')
+            new_rel.set('Id', f'rId{new_id}')
+            new_rel.set('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments')
+            new_rel.set('Target', 'comments.xml')
+            
+            return etree.tostring(root, encoding='unicode', xml_declaration=True)
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Failed to add comments relationship: {e}")
+            return rels_content
+    
+    def _add_comments_content_type(self, content_types: str) -> str:
+        """
+        [Content_Types].xmlにコメントのコンテンツタイプを追加する。
+        """
+        try:
+            from lxml import etree
+            
+            # 既にコメントタイプがある場合はスキップ
+            if 'comments.xml' in content_types:
+                return content_types
+            
+            # XMLをパース
+            root = etree.fromstring(content_types.encode('utf-8'))
+            ns = 'http://schemas.openxmlformats.org/package/2006/content-types'
+            
+            # コメントのコンテンツタイプを追加
+            override = etree.SubElement(root, f'{{{ns}}}Override')
+            override.set('PartName', '/word/comments.xml')
+            override.set('ContentType', 'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml')
+            
+            return etree.tostring(root, encoding='unicode', xml_declaration=True)
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Failed to add comments content type: {e}")
+            return content_types
