@@ -290,7 +290,19 @@ class DrafterAgent:
                             summary += f"  - {filename}\n"
                         format_info += summary
                     else:
-                        logging.info("[DRAFTER] Playwright deep search also found no files")
+                        logging.info("[DRAFTER] Playwright deep search also found no files, trying homepage fallback...")
+                        
+                        # Fallback 2: ホームページからナビゲーション探索
+                        homepage_files = self._run_homepage_fallback(sanitized_grant_name, user_id)
+                        if homepage_files:
+                            downloaded_files.extend(homepage_files)
+                            summary = "\n\n---\n## 📎 ホームページナビゲーション探索の結果\n\n"
+                            summary += f"✅ **ダウンロード成功**: {len(homepage_files)}件\n"
+                            for file_path, filename in homepage_files:
+                                summary += f"  - {filename}\n"
+                            format_info += summary
+                        else:
+                            logging.info("[DRAFTER] Homepage fallback also found no files")
                 except Exception as pw_error:
                     logging.warning(f"[DRAFTER] Playwright deep search failed: {pw_error}")
             
@@ -715,6 +727,71 @@ class DrafterAgent:
                     
         except Exception as e:
             logging.error(f"[DRAFTER] Async deep search error: {e}")
+        
+        return downloaded_files
+
+    def _run_homepage_fallback(
+        self, 
+        grant_name: str, 
+        user_id: str
+    ) -> List[Tuple[str, str]]:
+        """
+        ホームページからナビゲーションを辿るFallback処理。
+        組織のトップページから助成金ページを探索してファイルを取得する。
+        
+        Args:
+            grant_name: 助成金名
+            user_id: ユーザーID
+            
+        Returns:
+            ダウンロードしたファイルのリスト [(file_path, filename), ...]
+        """
+        try:
+            from src.tools.site_explorer import run_sync
+            
+            logging.info(f"[DRAFTER] Starting homepage fallback for: {grant_name}")
+            
+            # Run async homepage fallback
+            return run_sync(self._async_homepage_fallback(grant_name, user_id))
+            
+        except Exception as e:
+            logging.error(f"[DRAFTER] Homepage fallback error: {e}")
+            return []
+    
+    async def _async_homepage_fallback(
+        self, 
+        grant_name: str, 
+        user_id: str
+    ) -> List[Tuple[str, str]]:
+        """
+        非同期ホームページFallback処理。
+        """
+        downloaded_files = []
+        
+        try:
+            # Use page scraper's homepage fallback
+            format_files = await self.page_scraper.fallback_from_homepage(grant_name, max_depth=3)
+            
+            if not format_files:
+                logging.info("[DRAFTER] Homepage fallback found no format files")
+                return []
+            
+            logging.info(f"[DRAFTER] Homepage fallback found {len(format_files)} potential files")
+            
+            # Download top-scored files
+            for file_info in format_files[:5]:
+                file_url = file_info.get('url')
+                if not file_url:
+                    continue
+                
+                logging.info(f"[DRAFTER] Downloading from homepage fallback: {file_url}")
+                result = self.file_downloader.download_file(file_url, user_id)
+                if result:
+                    downloaded_files.append(result)
+                    logging.info(f"[DRAFTER] Downloaded: {result[1]}")
+                    
+        except Exception as e:
+            logging.error(f"[DRAFTER] Async homepage fallback error: {e}")
         
         return downloaded_files
 

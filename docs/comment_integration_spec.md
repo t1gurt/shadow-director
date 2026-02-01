@@ -137,3 +137,78 @@ Discordに表示されるテキストレポートは統計サマリーのみに�
 - [ ] Wordファイル末尾に懸念点一覧セクションがある
 - [ ] Discordに表示されるレポートが統計サマリー形式になっている
 - [ ] 推敲後のドラフト内容がWord/Excel入力に反映されている
+
+---
+
+## 2026-02-01 Bugfix: OOXML構造の修正
+
+### 問題
+
+Wordファイルを開くと「修正個所の表示」ダイアログが表示され、「文字のプロパティ」エラーが複数発生する。
+
+### 原因
+
+`comments.xml`に含まれるコメント要素のOOXML構造が不完全だった：
+- `w:rPr`（ランプロパティ）要素が欠落
+- `w:pPr`（段落プロパティ）要素が欠落
+- 名前空間の一部が不足
+
+### 修正内容
+
+| メソッド | 修正内容 |
+|---------|---------|
+| `_add_comment_to_comments_part` | `w:rPr`と`w:pPr`を追加、`w:lang`属性を設定 |
+| `_build_comments_xml` (新規) | 正しいOOXML形式を手動で構築 |
+| `_inject_comments_to_docx` | `_build_comments_xml`を使用するよう変更 |
+
+### 修正後のXML構造
+
+```xml
+<!-- document.xml内 (commentReferenceを含むrun) -->
+<w:r>
+  <w:rPr>
+    <w:sz w:val="16"/>
+    <w:szCs w:val="16"/>
+  </w:rPr>
+  <w:commentReference w:id="0"/>
+</w:r>
+
+<!-- comments.xml内 -->
+<w:comment w:id="0" w:author="Shadow Director AI" w:date="..." w:initials="SD">
+  <w:p>
+    <w:pPr/>
+    <w:r>
+      <w:rPr><w:lang w:val="ja-JP"/></w:rPr>
+      <w:t xml:space="preserve">【⚠️ 情報不足】...</w:t>
+    </w:r>
+  </w:p>
+</w:comment>
+```
+
+### 検証結果
+
+テストスクリプト `test_comment_fix.py` で生成した `testdata/test_comment_fixed_v2.docx` を確認:
+- ✅ `w:rPr` が `commentReference` の前に正しく挿入されている
+- ✅ `comments.xml` に正しい `w:pPr`, `w:rPr`, `w:lang` が含まれている
+- ✅ `word/_rels/document.xml.rels` に `comments.xml` へのリレーションシップが追加されている
+- ✅ `[Content_Types].xml` に `comments.xml` のオーバーライドが追加されている
+
+---
+
+## 2026-02-01 追加修正: XML更新メソッドの改善
+
+### 問題
+
+lxmlライブラリによるXML操作が、一部の環境で名前空間の処理に失敗し、リレーションシップとContent-Typeが正しく更新されていなかった。
+
+### 修正内容
+
+| メソッド | 修正内容 |
+|---------|---------|
+| `_add_comments_relationship` | lxmlからシンプルな文字列置換に変更 |
+| `_add_comments_content_type` | lxmlからシンプルな文字列置換に変更 |
+
+> [!NOTE]
+> 以前のエラーファイルは修正前のコードで生成されたものです。
+> 修正後は `testdata/test_comment_fixed_v2.docx` を開いてエラーがないことを確認してください。
+
