@@ -1586,7 +1586,8 @@ JSONのみを出力してください。
         profile: str,
         grant_name: str = "",
         grant_info: str = "",
-        progress_callback=None
+        progress_callback=None,
+        refined_draft: str = ""
     ) -> Dict[str, Any]:
         """
         各フィールドに対して個別にGemini 3.0 Flashを呼び出し、
@@ -1598,6 +1599,7 @@ JSONのみを出力してください。
             grant_name: 助成金名
             grant_info: 助成金の詳細情報（募集要項など）
             progress_callback: 進捗通知用コールバック関数 (field_idx, total, field_name) -> None
+            refined_draft: 推敲ループで改善されたドラフト（参照情報として使用）
             
         Returns:
             Dict[str, Any] - 入力値と入力パターン情報を含むマッピング
@@ -1618,6 +1620,18 @@ JSONのみを出力してください。
         
         result = {}
         total_fields = len(fields)
+        
+        # 推敲済みドラフトの参照セクションを構築
+        draft_reference = ""
+        if refined_draft:
+            draft_reference = f"""
+# 推敲済みドラフト（参照用）
+以下は既に推敲ループで改善されたドラフトです。この内容を参考に回答を作成してください。
+ドラフトと矛盾しない内容で、かつドラフトの表現スタイルを踏襲してください。
+
+{refined_draft[:5000]}
+
+"""
         
         for idx, field in enumerate(fields):
             try:
@@ -1658,7 +1672,7 @@ JSONのみを出力してください。
 # 対象助成金
 助成金名: {grant_name}
 {grant_info[:3000] if grant_info else ""}
-
+{draft_reference}
 # 回答すべき項目
 - **項目名**: {field.field_name}
 - **説明**: {field.description or "（説明なし）"}
@@ -1887,12 +1901,13 @@ JSONのみを出力してください。
             quality_score = 0
             completion_rate = 0
         
-        # レポートが不要な場合（すべて問題なし）
+        # 懸念点があるか確認
         concerns_exist = (missing_info_fields or uncertain_fields or 
                          length_exceeded_fields or truncated_fields)
+        concern_total = len(missing_info_fields) + len(uncertain_fields) + len(length_exceeded_fields) + len(truncated_fields)
         
-        # 常に品質サマリーは表示
-        report = "## 📊 ドラフト品質レポート\n\n"
+        # 簡潔な統計サマリー形式のレポート
+        report = "## 📋 ドラフト品質サマリー\n\n"
         
         # 品質スコアの表示
         if quality_score >= 80:
@@ -1905,47 +1920,38 @@ JSONのみを出力してください。
             score_emoji = "🔴"
             score_label = "要改善"
         
-        report += f"**品質スコア**: {score_emoji} **{quality_score}点** ({score_label})\n"
-        report += f"**完成度**: {completion_rate}% ({total_fields - len(missing_info_fields)}/{total_fields}項目入力済み)\n"
-        
-        if retry_total > 0:
-            report += f"**自動修正**: {retry_total}回の文字数制限超過を自動修正しました\n"
-        
-        report += "\n"
+        report += f"- **品質スコア**: {score_emoji} **{quality_score}点** ({score_label})\n"
+        report += f"- ✅ **正常入力**: {good_fields}項目\n"
         
         # 懸念点がない場合
         if not concerns_exist:
-            report += "> ✅ すべての項目が正常に入力されました。内容をご確認ください。\n"
+            if retry_total > 0:
+                report += f"- 🔧 **自動修正**: {retry_total}回の文字数超過を修正\n"
+            report += "\n> すべての項目が正常に入力されました！\n"
             return report
         
-        # 懸念点がある場合
-        report += "### ⚠️ 懸念点\n\n"
+        # 懸念点がある場合の統計サマリー
+        report += f"- ⚠️ **要確認**: {concern_total}項目（Word/Excelのコメントを参照）\n"
         
-        if length_exceeded_fields:
-            report += "#### 📏 文字数制限を超過した項目\n"
-            for item in length_exceeded_fields:
-                report += f"- **{item['field_name']}**: {item['reason']}\n"
-            report += "\n"
-        
-        if truncated_fields:
-            report += "#### ✂️ 省略記号で終わっている項目\n"
-            for item in truncated_fields:
-                report += f"- **{item['field_name']}**: {item['reason']}\n"
-            report += "\n"
-        
+        # 内訳を簡潔に表示
+        breakdown = []
         if missing_info_fields:
-            report += "#### 📋 情報不足で埋められなかった項目\n"
-            for item in missing_info_fields:
-                report += f"- **{item['field_name']}**: {item['reason']}\n"
-            report += "\n"
-        
+            breakdown.append(f"情報不足: {len(missing_info_fields)}項目")
         if uncertain_fields:
-            report += "#### ❓ 確認が必要な項目\n"
-            for item in uncertain_fields:
-                report += f"- **{item['field_name']}**: {item['reason']}\n"
-            report += "\n"
+            breakdown.append(f"不確実: {len(uncertain_fields)}項目")
+        if length_exceeded_fields:
+            breakdown.append(f"文字数超過: {len(length_exceeded_fields)}項目")
+        if truncated_fields:
+            breakdown.append(f"省略あり: {len(truncated_fields)}項目")
         
-        report += "> 💡 上記の項目については、ドラフトを確認し必要に応じて修正してください。\n"
+        if breakdown:
+            report += f"  - {' / '.join(breakdown)}\n"
+        
+        if retry_total > 0:
+            report += f"- 🔧 **自動修正**: {retry_total}回の文字数超過を修正\n"
+        
+        report += "\n> 💡 詳細は添付のWord/Excelファイル内のコメントをご確認ください。\n"
         
         return report
+
 

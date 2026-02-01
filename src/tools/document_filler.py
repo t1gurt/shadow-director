@@ -156,6 +156,7 @@ class DocumentFiller:
         """
         try:
             import openpyxl
+            from openpyxl.comments import Comment
         except ImportError:
             return None, "openpyxlがインストールされていません"
         
@@ -167,8 +168,21 @@ class DocumentFiller:
             # ファイルを開いて編集
             wb = openpyxl.load_workbook(output_path)
             filled_count = 0
+            concern_count = 0
             
-            for field_id, value in field_values.items():
+            for field_id, field_data in field_values.items():
+                # 新形式と旧形式の両方に対応
+                if isinstance(field_data, dict):
+                    value = field_data.get("value", "")
+                    concern_type = field_data.get("concern_type", "none")
+                    concern_reason = field_data.get("concern_reason", "")
+                    field_name = field_data.get("field_name", field_id)
+                else:
+                    value = field_data
+                    concern_type = "none"
+                    concern_reason = ""
+                    field_name = field_id
+                
                 if not value:
                     continue
                 
@@ -188,8 +202,15 @@ class DocumentFiller:
                         continue
                     
                     sheet = wb[sheet_name]
-                    sheet.cell(row=row, column=col, value=value)
+                    cell = sheet.cell(row=row, column=col, value=value)
                     filled_count += 1
+                    
+                    # 懸念点がある場合はコメントを追加
+                    if concern_type != "none" and concern_reason:
+                        comment_text = self._get_concern_comment_text(concern_type, concern_reason, field_name)
+                        cell.comment = Comment(comment_text, "Shadow Director AI")
+                        concern_count += 1
+                        self.logger.debug(f"[DOC_FILLER] Added comment to {field_id}: {concern_type}")
                     
                 except (ValueError, IndexError) as e:
                     self.logger.warning(f"[DOC_FILLER] Error filling field {field_id}: {e}")
@@ -197,12 +218,16 @@ class DocumentFiller:
             wb.save(output_path)
             wb.close()
             
-            self.logger.info(f"[DOC_FILLER] Filled {filled_count} fields in Excel")
+            self.logger.info(f"[DOC_FILLER] Filled {filled_count} fields in Excel, {concern_count} comments added")
             
             if filled_count == 0:
                 return None, "入力できるフィールドがありませんでした"
             
-            return output_path, f"Excelに{filled_count}項目を入力しました"
+            message = f"Excelに{filled_count}項目を入力しました"
+            if concern_count > 0:
+                message += f"（{concern_count}件の懸念点コメント付き）"
+            
+            return output_path, message
             
         except Exception as e:
             self.logger.error(f"[DOC_FILLER] Excel fill error: {e}")
@@ -229,6 +254,7 @@ class DocumentFiller:
         """
         try:
             from docx import Document
+            from docx.shared import Pt, RGBColor
         except ImportError:
             return None, "python-docxがインストールされていません"
         
@@ -240,6 +266,8 @@ class DocumentFiller:
             # ファイルを開いて編集
             doc = Document(output_path)
             filled_count = 0
+            concern_count = 0
+            concerns_list = []  # 懸念点一覧用
             
             for field_id, field_data in field_values.items():
                 # 新形式と旧形式の両方に対応
@@ -248,15 +276,33 @@ class DocumentFiller:
                     input_pattern = field_data.get("input_pattern", "inline")
                     location = field_data.get("location", {})
                     input_length_type = field_data.get("input_length_type", "unknown")
+                    concern_type = field_data.get("concern_type", "none")
+                    concern_reason = field_data.get("concern_reason", "")
+                    field_name = field_data.get("field_name", field_id)
                 else:
                     # 旧形式（文字列のみ）
                     value = field_data
                     input_pattern = "inline"
                     location = {}
                     input_length_type = "unknown"
+                    concern_type = "none"
+                    concern_reason = ""
+                    field_name = field_id
                 
                 if not value:
                     continue
+                
+                # 懸念点がある場合はマーカーを追加し、リストに蓄積
+                if concern_type != "none" and concern_reason:
+                    concern_count += 1
+                    marker = f" [※{concern_count}]"
+                    value = value + marker
+                    concerns_list.append({
+                        "number": concern_count,
+                        "field_name": field_name,
+                        "concern_type": concern_type,
+                        "concern_reason": concern_reason
+                    })
                 
                 try:
                     if field_id.startswith("table"):
@@ -276,14 +322,22 @@ class DocumentFiller:
                 except Exception as e:
                     self.logger.warning(f"[DOC_FILLER] Error filling field {field_id}: {e}")
             
+            # 懸念点がある場合、ドキュメント末尾に一覧を追加
+            if concerns_list:
+                self._add_word_concerns_section(doc, concerns_list)
+            
             doc.save(output_path)
             
-            self.logger.info(f"[DOC_FILLER] Filled {filled_count} fields in Word")
+            self.logger.info(f"[DOC_FILLER] Filled {filled_count} fields in Word, {concern_count} concerns marked")
             
             if filled_count == 0:
                 return None, "入力できるフィールドがありませんでした"
             
-            return output_path, f"Wordに{filled_count}項目を入力しました"
+            message = f"Wordに{filled_count}項目を入力しました"
+            if concern_count > 0:
+                message += f"（{concern_count}件の懸念点マーカー付き）"
+            
+            return output_path, message
             
         except Exception as e:
             self.logger.error(f"[DOC_FILLER] Word fill error: {e}")
@@ -579,3 +633,104 @@ class DocumentFiller:
                         
         except Exception as e:
             self.logger.warning(f"[DOC_FILLER] Cleanup error: {e}")
+    
+    def _get_concern_comment_text(self, concern_type: str, concern_reason: str, field_name: str) -> str:
+        """
+        懸念点タイプに応じたコメントテキストを生成する。
+        
+        Args:
+            concern_type: 懸念点タイプ（missing_info, uncertain, length_exceeded, truncated）
+            concern_reason: 懸念点の理由
+            field_name: フィールド名
+            
+        Returns:
+            コメントテキスト
+        """
+        type_labels = {
+            "missing_info": "⚠️ 情報不足",
+            "uncertain": "❓ 要確認",
+            "length_exceeded": "📏 文字数超過",
+            "truncated": "✂️ 回答省略"
+        }
+        
+        type_label = type_labels.get(concern_type, "⚠️ 懸念あり")
+        
+        comment = f"""【{type_label}】
+項目: {field_name}
+理由: {concern_reason}
+
+※ 内容をご確認のうえ、必要に応じて修正してください。
+(自動生成: Shadow Director AI)"""
+        
+        return comment
+    
+    def _add_word_concerns_section(self, doc, concerns_list: list):
+        """
+        Wordドキュメント末尾に懸念点一覧セクションを追加する。
+        
+        Args:
+            doc: Wordドキュメント
+            concerns_list: 懸念点情報のリスト
+        """
+        try:
+            from docx.shared import Pt, RGBColor
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+        except ImportError:
+            self.logger.warning("[DOC_FILLER] Failed to import docx components for concerns section")
+            return
+        
+        try:
+            # 区切り線として空白行を追加
+            doc.add_paragraph("")
+            doc.add_paragraph("─" * 40)
+            
+            # タイトル段落
+            title_para = doc.add_paragraph()
+            title_run = title_para.add_run("📋 Shadow Director AI - 懸念点一覧")
+            title_run.bold = True
+            title_run.font.size = Pt(12)
+            
+            # 説明
+            desc_para = doc.add_paragraph()
+            desc_run = desc_para.add_run("以下の項目については、内容をご確認のうえ必要に応じて修正してください。")
+            desc_run.font.size = Pt(10)
+            desc_run.font.color.rgb = RGBColor(100, 100, 100)
+            
+            # 懸念点リスト
+            type_labels = {
+                "missing_info": "⚠️ 情報不足",
+                "uncertain": "❓ 要確認",
+                "length_exceeded": "📏 文字数超過",
+                "truncated": "✂️ 回答省略"
+            }
+            
+            for concern in concerns_list:
+                number = concern["number"]
+                field_name = concern["field_name"]
+                concern_type = concern["concern_type"]
+                concern_reason = concern["concern_reason"]
+                
+                type_label = type_labels.get(concern_type, "⚠️ 懸念あり")
+                
+                item_para = doc.add_paragraph()
+                item_run = item_para.add_run(f"[※{number}] 【{type_label}】{field_name}")
+                item_run.bold = True
+                item_run.font.size = Pt(10)
+                
+                reason_para = doc.add_paragraph()
+                reason_run = reason_para.add_run(f"    → {concern_reason}")
+                reason_run.font.size = Pt(9)
+                reason_run.font.color.rgb = RGBColor(80, 80, 80)
+            
+            # フッター
+            doc.add_paragraph("")
+            footer_para = doc.add_paragraph()
+            footer_run = footer_para.add_run("※ この懸念点一覧は提出前に削除してください。")
+            footer_run.font.size = Pt(8)
+            footer_run.font.color.rgb = RGBColor(150, 150, 150)
+            footer_run.italic = True
+            
+            self.logger.info(f"[DOC_FILLER] Added concerns section with {len(concerns_list)} items")
+            
+        except Exception as e:
+            self.logger.warning(f"[DOC_FILLER] Failed to add concerns section: {e}")

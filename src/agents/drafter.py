@@ -1032,11 +1032,13 @@ class DrafterAgent:
                         
                         # Fill fields individually using profile (field-by-field processing)
                         # Note: No Discord notification per field - progress is logged only
+                        # draft_contentには推敲ループ後の改善されたドラフトが含まれる
                         field_values = self.format_mapper.fill_fields_individually(
                             fields=fields,
                             profile=profile,
                             grant_name=grant_name,
-                            grant_info=grant_info
+                            grant_info=grant_info,
+                            refined_draft=draft_content  # 推敲後のドラフトを参照情報として渡す
                         )
                         
                         if not field_values:
