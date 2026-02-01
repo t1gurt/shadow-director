@@ -62,12 +62,20 @@ field_values = self.format_mapper.fill_fields_individually(
 
 ---
 
-### 3. Word懸念点マーカー
+### 3. Wordネイティブコメント
 
-python-docxではネイティブのコメント機能がないため、以下の方式で対応:
+WordのOOXML（Office Open XML）を直接操作して、正式なコメントを挿入します。
 
-1. **インラインマーカー**: 懸念点がある項目の末尾に `[※1]` 形式のマーカーを追加
-2. **懸念点一覧セクション**: ドキュメント末尾に懸念点一覧を追加
+**実装方式:**
+1. `commentRangeStart` / `commentRangeEnd` 要素でコメント範囲を指定
+2. `commentReference` でコメントへの参照を追加
+3. python-docxでSave後、ZIP操作で`comments.xml`を注入
+4. `[Content_Types].xml`と`document.xml.rels`を更新
+
+**メリット:**
+- ✅ Wordの「コメント」パネルに一覧表示
+- ✅ 返信・解決等の機能が使える
+- ✅ 印刷時の表示/非表示を制御可能
 
 **ドキュメント末尾の形式:**
 ```
